@@ -195,11 +195,28 @@ class RolePanelView(discord.ui.View):
 
 
 def build_roles_embed(cfg: dict) -> discord.Embed:
-    lines = ["メニューから選ぶとロールが付くよ（複数選択OK）。選び直すと、選んだものだけが付いている状態になります。", "外したいときは下の「付けているロールを外す」ボタンから。", ""]
+    lines = [cfg.get("roles_panel_text") or "", ""]
     for cat in cfg["role_categories"]:
         lines.append(f"**{cat['label']}**: {' / '.join(cat['roles'])}")
     embed = discord.Embed(title="🏷️ ロール選択", description="\n".join(lines), color=discord.Color.blue())
     return embed
+
+
+async def refresh_roles_panel(guild: discord.Guild) -> bool:
+    """設置済みのロール選択パネルの文章を、現在の設定で書き換える。成功したら True"""
+    cfg = store.cfg(guild.id)
+    panel = cfg.get("panels", {}).get("roles")
+    if not panel:
+        return False
+    ch = guild.get_channel(panel.get("channel_id"))
+    if ch is None:
+        return False
+    try:
+        msg = await ch.fetch_message(panel["message_id"])
+        await msg.edit(embed=build_roles_embed(cfg))  # メニューはそのまま残る
+        return True
+    except Exception:
+        return False
 
 
 
