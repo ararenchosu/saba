@@ -114,6 +114,22 @@ class RoleSelect(discord.ui.Select):
                 if held is None or held not in member.roles:
                     await interaction.response.send_message(f"⚠️ 「{value}」は1回限りのロールで、あなたは取得済みだよ。", ephemeral=True)
                     return
+        # 「どれか1つだけ」カテゴリ: 過去に別ロールを取得していたら他のロールは取得不可
+        if cat.get("exclusive_once"):
+            claimed_map = cfg.get("claimed_once", {})
+            past = [n for n in cat["roles"] if member.id in claimed_map.get(n, [])]
+            if past and value not in past:
+                await interaction.response.send_message(f"⚠️ 「{cat['label']}」はどれか1つだけ取得できて、あなたは「{past[0]}」を取得済みだよ。他のロールは取得できません。", ephemeral=True)
+                return
+            if not past:
+                # 履歴がなくても、今カテゴリ内の別ロールを付けていれば付け替え不可
+                for n in cat["roles"]:
+                    if n == value:
+                        continue
+                    r = discord.utils.get(interaction.guild.roles, name=n)
+                    if r and r in member.roles:
+                        await interaction.response.send_message(f"⚠️ 「{cat['label']}」はどれか1つだけだよ。すでに「{n}」を付けているので変更できません。", ephemeral=True)
+                        return
         role = await get_or_create_role(interaction.guild, value)
         if role is None:
             await interaction.response.send_message("❌ ロールを作成できませんでした（BOTの権限不足）。管理者に連絡してください。", ephemeral=True)
@@ -131,8 +147,8 @@ class RoleSelect(discord.ui.Select):
         except discord.Forbidden:
             await interaction.response.send_message("❌ ロールを付けられませんでした（BOTより上のロール）。管理者に連絡してください。", ephemeral=True)
             return
-        # 1回限りロールは取得を記録する
-        if value in cat.get("once_roles", []):
+        # 1回限りロール／「どれか1つだけ」カテゴリは取得を記録する
+        if value in cat.get("once_roles", []) or cat.get("exclusive_once"):
             claimed = cfg.setdefault("claimed_once", {})
             if member.id not in claimed.setdefault(value, []):
                 claimed[value].append(member.id)
@@ -197,7 +213,8 @@ def build_roles_embed(cfg: dict) -> discord.Embed:
     for cat in cfg["role_categories"]:
         once = set(cat.get("once_roles", []))
         names = " / ".join(f"{r}（1回限り）" if r in once else r for r in cat["roles"])
-        lines.append(f"**{cat['label']}**: {names}")
+        suffix = "（どれか1つだけ・変更不可）" if cat.get("exclusive_once") else ""
+        lines.append(f"**{cat['label']}**: {names}{suffix}")
     embed = discord.Embed(title="🏷️ ロール選択", description="\n".join(lines), color=discord.Color.blue())
     return embed
 
