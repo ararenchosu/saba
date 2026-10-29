@@ -74,12 +74,27 @@ class IntroPanelView(discord.ui.View):
 
 def build_intro_panel_embed(cfg: dict) -> discord.Embed:
     dest = cfg.get("intro_channel_id")
-    dest_text = f"<#{dest}>" if dest else "（送信先未設定）"
-    return discord.Embed(
-        title="📝 自己紹介",
-        description=f"下のボタンから自己紹介を書いてね。書いた内容は {dest_text} に投稿されます。",
-        color=discord.Color.teal(),
-    )
+    desc = cfg.get("intro_panel_text") or ""
+    if dest:
+        desc += f"\n\n書いた内容は <#{dest}> に投稿されます。"
+    return discord.Embed(title="📝 自己紹介", description=desc, color=discord.Color.teal())
+
+
+async def refresh_intro_panel(guild) -> bool:
+    """設置済みの自己紹介パネルの文章を、現在の設定で書き換える。成功したら True"""
+    cfg = store.cfg(guild.id)
+    panel = cfg.get("panels", {}).get("intro")
+    if not panel:
+        return False
+    ch = guild.get_channel(panel.get("channel_id"))
+    if ch is None:
+        return False
+    try:
+        msg = await ch.fetch_message(panel["message_id"])
+        await msg.edit(embed=build_intro_panel_embed(cfg))  # ボタンはそのまま残る
+        return True
+    except Exception:
+        return False
 
 
 @bot.tree.command(name="setup_intro", description="このチャンネルに自己紹介パネルを設置する（管理者用）")
