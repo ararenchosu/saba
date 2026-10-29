@@ -8,6 +8,7 @@ main.py — 荒野行動 公開サーバー向け Discord BOT の起動ファイ
   recruit.py     … 募集システム
   settings.py    … 管理者用 設定パネル（/settings）
   moderation.py  … NGワード / 連投対策
+  intro.py       … 自己紹介パネル
 
 環境変数: DISCORD_TOKEN（.env ファイルでも可）
 KataBump の Startup ファイル名は main.py にしてください。
@@ -21,8 +22,10 @@ import gate  # noqa: F401  （コマンド・イベント登録のため import�
 import recruit  # noqa: F401
 import settings  # noqa: F401
 import moderation  # noqa: F401
+import intro  # noqa: F401
 from gate import RulesView, RolePanelView
 from recruit import RecruitPanelView, RecruitCardView, expire_recruitments
+from intro import IntroPanelView
 
 @bot.tree.command(name="bothelp", description="コマンド一覧を表示する")
 async def cmd_help(interaction: discord.Interaction):
@@ -33,6 +36,7 @@ async def cmd_help(interaction: discord.Interaction):
             "`/setup_rules` ルール同意パネル設置\n"
             "`/setup_roles` ロール選択パネル設置\n"
             "`/setup_recruit` 募集パネル設置\n"
+            "`/setup_intro` 自己紹介パネル設置 / `/setintro` 自己紹介の送信先設定\n"
             "`/setwelcome` / `/setlog` 投稿先チャンネル設定\n"
             "`/setup_gate` 認証ゲートの権限を一括適用\n"
             "`/settings` 設定パネル（項目・ロール・NGワード編集）"
@@ -73,6 +77,7 @@ async def on_ready():
     # 設置済みパネルのボタンを復旧
     bot.add_view(RulesView())
     bot.add_view(RecruitPanelView())
+    bot.add_view(IntroPanelView())
     for gid, cfg in store.configs.items():
         panels = cfg.get("panels", {})
         if "roles" in panels:
