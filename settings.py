@@ -44,6 +44,7 @@ class AddCategoryModal(discord.ui.Modal, title="ロールカテゴリを追加")
     label = discord.ui.TextInput(label="カテゴリ名", max_length=30, placeholder="例: よく遊ぶ時間帯")
     roles = discord.ui.TextInput(label="ロール名（カンマ区切り）", style=discord.TextStyle.paragraph, max_length=500, placeholder="例: 昼, 夜, 深夜")
     once = discord.ui.TextInput(label="1回限りのロール（カンマ区切り・任意）", max_length=200, required=False, placeholder="例: 先行メンバー（上のロールの中から指定）")
+    exclusive = discord.ui.TextInput(label="どれか1つだけにする（はい/いいえ）", max_length=5, required=False, default="いいえ")
 
     def __init__(self, guild_id):
         super().__init__()
@@ -59,7 +60,7 @@ class AddCategoryModal(discord.ui.Modal, title="ロールカテゴリを追加")
             await interaction.response.send_message("同じ名前のカテゴリがすでにあるよ。", ephemeral=True)
             return
         once_names = [r for r in _parse_list(str(self.once)) if r in names]
-        cfg["role_categories"].append({"label": str(self.label), "multi": False, "roles": names, "once_roles": once_names})
+        cfg["role_categories"].append({"label": str(self.label), "multi": False, "roles": names, "once_roles": once_names, "exclusive_once": _is_yes(str(self.exclusive))})
         store.save_config()
         await interaction.response.send_message(f"✅ カテゴリ「{self.label}」を追加したよ。反映するにはロールパネルを /setup_roles で再設置してね。", ephemeral=True)
 
@@ -118,9 +119,16 @@ class EditCategoryModal(discord.ui.Modal, title="ロールカテゴリを編集"
             required=False,
             default=", ".join(category.get("once_roles", [])),
         )
+        self.exclusive = discord.ui.TextInput(
+            label="どれか1つだけにする（はい/いいえ）",
+            max_length=5,
+            required=False,
+            default="はい" if category.get("exclusive_once") else "いいえ",
+        )
         self.add_item(self.label)
         self.add_item(self.roles)
         self.add_item(self.once)
+        self.add_item(self.exclusive)
 
     async def on_submit(self, interaction: discord.Interaction):
         cfg = store.cfg(self.guild_id)
@@ -138,6 +146,7 @@ class EditCategoryModal(discord.ui.Modal, title="ロールカテゴリを編集"
                     c["label"] = new_label
                 c["roles"] = names
                 c["once_roles"] = [r for r in _parse_list(str(self.once)) if r in names]
+                c["exclusive_once"] = _is_yes(str(self.exclusive))
                 _prune_once_claims(self.guild_id)
                 store.save_config()
                 await interaction.response.send_message(
@@ -386,12 +395,18 @@ class ReorderSelectView(discord.ui.View):
         await interaction.response.send_message(f"「{name}」をどこへ移動する？", view=MoveItemView(self.guild_id, self.cfg_key, self.title, idx), ephemeral=True)
 
 
+def _is_yes(s: str) -> bool:
+    return any(k in s for k in ("はい", "する", "有効", "あり", "yes", "on", "true"))
+
+
 def _prune_once_claims(guild_id):
     """どのカテゴリの1回限り指定からも外れたロールの取得履歴を消す（履歴リセットの兼用）"""
     cfg = store.cfg(guild_id)
     valid = set()
     for c in cfg["role_categories"]:
         valid |= set(c.get("once_roles", []))
+        if c.get("exclusive_once"):
+            valid |= set(c["roles"])
     claimed = cfg.get("claimed_once", {})
     cfg["claimed_once"] = {k: v for k, v in claimed.items() if k in valid}
 
@@ -595,7 +610,8 @@ class SettingsView(discord.ui.View):
         for c in cfg["role_categories"]:
             once = c.get("once_roles", [])
             suffix = f"（1回限り: {', '.join(once)}）" if once else ""
-            lines.append(f"- {c['label']}: {' / '.join(c['roles'])}{suffix}")
+            excl = "（どれか1つだけ）" if c.get("exclusive_once") else ""
+            lines.append(f"- {c['label']}: {' / '.join(c['roles'])}{suffix}{excl}")
         lines.append("")
         dest = cfg.get("intro_channel_id")
         lines.append(f"**自己紹介**（送信先: {f'<#{dest}>' if dest else '未設定'}）")
