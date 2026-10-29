@@ -29,6 +29,15 @@ TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN") or os.geten
 # ---------------- デフォルト設定（/settings で変更可能） ----------------
 DEFAULT_CONFIG = {
     "verify_role": "メンバー",  # ルール同意で付けるロール名
+    # ルール同意パネルに表示する文章（/settings から変更可能）
+    "rules_text": (
+        "参加ありがとう！サーバーを使う前に、下のルールを確認して同意ボタンを押してね。\n\n"
+        "1. 誹謗中傷・暴言は禁止\n"
+        "2. 宣伝・勧誘・荒らし行為は禁止\n"
+        "3. 個人情報は載せない\n"
+        "4. 募集のドタキャンは一言連絡を\n"
+        "5. その他、みんなが気持ちよく遊べるように"
+    ),
     "welcome_channel_id": None,
     "log_channel_id": None,
     "recruit_channel_id": None,
