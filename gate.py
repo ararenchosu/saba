@@ -56,20 +56,30 @@ class RulesView(discord.ui.View):
 
 
 def build_rules_embed(guild: discord.Guild) -> discord.Embed:
+    cfg = store.cfg(guild.id)
     embed = discord.Embed(
         title=f"📜 {guild.name} のルール",
-        description=(
-            "参加ありがとう！サーバーを使う前に、下のルールを確認して同意ボタンを押してね。\n\n"
-            "1. 誹謗中傷・暴言は禁止\n"
-            "2. 宣伝・勧誘・荒らし行為は禁止\n"
-            "3. 個人情報は載せない\n"
-            "4. 募集のドタキャンは一言連絡を\n"
-            "5. その他、みんなが気持ちよく遊べるように\n\n"
-            "※ ルールの文面はこのメッセージを編集して自由に変えられます（ボタンはそのまま使えます）。"
-        ),
+        description=cfg.get("rules_text") or "",
         color=discord.Color.orange(),
     )
     return embed
+
+
+async def refresh_rules_panel(guild: discord.Guild) -> bool:
+    """設置済みのルール同意パネルの文章を、現在の設定で書き換える。成功したら True"""
+    cfg = store.cfg(guild.id)
+    panel = cfg.get("panels", {}).get("rules")
+    if not panel:
+        return False
+    ch = guild.get_channel(panel.get("channel_id"))
+    if ch is None:
+        return False
+    try:
+        msg = await ch.fetch_message(panel["message_id"])
+        await msg.edit(embed=build_rules_embed(guild))  # ボタンはそのまま残る
+        return True
+    except Exception:
+        return False
 
 
 # ---------------- ロール選択パネル ----------------
