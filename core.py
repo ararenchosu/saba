@@ -55,6 +55,15 @@ DEFAULT_CONFIG = {
         {"label": "プレイスタイル", "multi": False, "roles": ["エンジョイ勢", "ガチ勢"]},
         {"label": "VC", "multi": False, "roles": ["VC可", "聞き専", "VC不可"]},
     ],
+    # 自己紹介の送信先チャンネル（/setintro で変更可能。初期値はユーザー指定のチャンネル）
+    "intro_channel_id": 1565427852713791669,
+    # 自己紹介フォームの項目（/settings で追加・編集・削除可能。最大5項目）
+    "intro_fields": [
+        {"label": "プレイヤー名", "required": True, "long": False},
+        {"label": "ランク帯", "required": False, "long": False},
+        {"label": "よく遊ぶ時間帯", "required": False, "long": False},
+        {"label": "一言", "required": False, "long": True},
+    ],
     # 設置済みパネル（再起動後にボタンを復旧するため）
     "panels": {},  # {"rules": {"channel_id":..,"message_id":..}, "roles": {...}, "recruit": {...}}
 }
