@@ -8,6 +8,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from core import bot, store
+from gate import refresh_rules_panel
 
 # ---------------- 設定パネル（管理者用） ----------------
 def _parse_list(text: str):
@@ -133,6 +134,30 @@ class EditCategoryModal(discord.ui.Modal, title="ロールカテゴリを編集"
                 )
                 return
         await interaction.response.send_message("カテゴリが見つからなかったよ（削除されたかも）。", ephemeral=True)
+
+
+class RulesTextModal(discord.ui.Modal, title="ルール文章を変更"):
+    def __init__(self, guild_id):
+        super().__init__()
+        self.guild_id = guild_id
+        cfg = store.cfg(guild_id)
+        self.text = discord.ui.TextInput(
+            label="ルール文章",
+            style=discord.TextStyle.paragraph,
+            max_length=4000,
+            default=cfg.get("rules_text", ""),
+        )
+        self.add_item(self.text)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = store.cfg(self.guild_id)
+        cfg["rules_text"] = str(self.text).strip()
+        store.save_config()
+        updated = await refresh_rules_panel(interaction.guild)
+        if updated:
+            await interaction.response.send_message("✅ ルール文章を更新して、設置済みのパネルにも反映したよ。", ephemeral=True)
+        else:
+            await interaction.response.send_message("✅ ルール文章を保存したよ（設置済みパネルが見つからなかったので、次に /setup_rules で設置するときに使われます）。", ephemeral=True)
 
 
 class SetVerifyRoleModal(discord.ui.Modal, title="認証ロールを設定"):
@@ -263,6 +288,10 @@ class SettingsView(discord.ui.View):
 
         opts = [discord.SelectOption(label=c["label"], value=c["label"]) for c in cfg["role_categories"]]
         await interaction.response.send_message("削除するカテゴリを選んでね:", view=_delete_select("カテゴリを選ぶ", "del_cat", opts, _pick), ephemeral=True)
+
+    @discord.ui.button(label="ルール文章を変更", style=discord.ButtonStyle.primary, row=2)
+    async def edit_rules(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RulesTextModal(self.guild_id))
 
     @discord.ui.button(label="認証ロールを設定", style=discord.ButtonStyle.primary, row=2)
     async def set_verify(self, interaction: discord.Interaction, button: discord.ui.Button):
