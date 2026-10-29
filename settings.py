@@ -8,7 +8,9 @@ from discord import app_commands
 from discord.ext import commands
 
 from core import bot, store
-from gate import refresh_rules_panel
+from gate import refresh_rules_panel, refresh_roles_panel
+from recruit import refresh_recruit_panel
+from intro import refresh_intro_panel
 
 # ---------------- 設定パネル（管理者用） ----------------
 def _parse_list(text: str):
@@ -194,6 +196,52 @@ class EditIntroFieldModal(discord.ui.Modal, title="自己紹介項目を編集")
                 await interaction.response.send_message(f"✅ 自己紹介項目「{f['label']}」を更新したよ。", ephemeral=True)
                 return
         await interaction.response.send_message("項目が見つからなかったよ（削除されたかも）。", ephemeral=True)
+
+
+class _PanelTextModal(discord.ui.Modal):
+    """パネル文章編集モーダルの共通処理（cfg_key と refresh 関数を差し替えて使う）"""
+
+    cfg_key = ""
+    refresh = None
+    panel_name = ""
+
+    def __init__(self, guild_id, max_length=3000):
+        super().__init__()
+        self.guild_id = guild_id
+        cfg = store.cfg(guild_id)
+        self.text = discord.ui.TextInput(
+            label="パネルに表示する文章",
+            style=discord.TextStyle.paragraph,
+            max_length=max_length,
+            default=cfg.get(self.cfg_key, ""),
+        )
+        self.add_item(self.text)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = store.cfg(self.guild_id)
+        cfg[self.cfg_key] = str(self.text).strip()
+        store.save_config()
+        updated = await self.refresh(interaction.guild) if self.refresh else False
+        tail = "設置済みパネルにも反映しました。" if updated else "（パネル未設置の場合は、次に設置したときに使われます）"
+        await interaction.response.send_message(f"✅ {self.panel_name} の文章を更新しました。{tail}", ephemeral=True)
+
+
+class RecruitPanelTextModal(_PanelTextModal, title="募集パネルの内容を編集"):
+    cfg_key = "recruit_panel_text"
+    refresh = staticmethod(refresh_recruit_panel)
+    panel_name = "募集パネル"
+
+
+class RolesPanelTextModal(_PanelTextModal, title="ロールパネルの内容を編集"):
+    cfg_key = "roles_panel_text"
+    refresh = staticmethod(refresh_roles_panel)
+    panel_name = "ロール選択パネル"
+
+
+class IntroPanelTextModal(_PanelTextModal, title="自己紹介パネルの内容を編集"):
+    cfg_key = "intro_panel_text"
+    refresh = staticmethod(refresh_intro_panel)
+    panel_name = "自己紹介パネル"
 
 
 class RulesTextModal(discord.ui.Modal, title="ルール文章を変更"):
@@ -399,6 +447,10 @@ class SettingsView(discord.ui.View):
     async def reorder_field(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._start_reorder(interaction, "recruit_fields", "募集項目")
 
+    @discord.ui.button(label="パネル内容を編集", emoji="📝", style=discord.ButtonStyle.secondary, row=0)
+    async def edit_recruit_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RecruitPanelTextModal(self.guild_id))
+
     @discord.ui.button(label="ロールカテゴリを追加", style=discord.ButtonStyle.primary, row=1)
     async def add_cat(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AddCategoryModal(self.guild_id))
@@ -441,19 +493,23 @@ class SettingsView(discord.ui.View):
     async def reorder_cat(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._start_reorder(interaction, "role_categories", "ロールカテゴリ")
 
-    @discord.ui.button(label="ルール文章を変更", style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(label="パネル内容を編集", emoji="📝", style=discord.ButtonStyle.secondary, row=1)
+    async def edit_roles_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RolesPanelTextModal(self.guild_id))
+
+    @discord.ui.button(label="ルール文章を変更", style=discord.ButtonStyle.primary, row=3)
     async def edit_rules(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(RulesTextModal(self.guild_id))
 
-    @discord.ui.button(label="認証ロールを設定", style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(label="認証ロールを設定", style=discord.ButtonStyle.primary, row=3)
     async def set_verify(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(SetVerifyRoleModal(self.guild_id))
 
-    @discord.ui.button(label="NGワードを追加", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="NGワードを追加", style=discord.ButtonStyle.secondary, row=3)
     async def add_ng(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AddNgWordModal(self.guild_id))
 
-    @discord.ui.button(label="自己紹介項目を追加", style=discord.ButtonStyle.primary, row=3)
+    @discord.ui.button(label="自己紹介項目を追加", style=discord.ButtonStyle.primary, row=2)
     async def add_intro(self, interaction: discord.Interaction, button: discord.ui.Button):
         cfg = store.cfg(self.guild_id)
         if len(cfg.get("intro_fields", [])) >= 5:
@@ -461,7 +517,7 @@ class SettingsView(discord.ui.View):
             return
         await interaction.response.send_modal(AddIntroFieldModal(self.guild_id))
 
-    @discord.ui.button(label="自己紹介項目を編集", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="自己紹介項目を編集", style=discord.ButtonStyle.secondary, row=2)
     async def edit_intro(self, interaction: discord.Interaction, button: discord.ui.Button):
         cfg = store.cfg(self.guild_id)
         if not cfg.get("intro_fields"):
@@ -479,7 +535,7 @@ class SettingsView(discord.ui.View):
         opts = [discord.SelectOption(label=f["label"], value=f["label"]) for f in cfg["intro_fields"]]
         await interaction.response.send_message("編集する項目を選んでね:", view=_delete_select("項目を選ぶ", "edit_intro", opts, _pick), ephemeral=True)
 
-    @discord.ui.button(label="自己紹介項目を削除", style=discord.ButtonStyle.danger, row=3)
+    @discord.ui.button(label="自己紹介項目を削除", style=discord.ButtonStyle.danger, row=2)
     async def del_intro(self, interaction: discord.Interaction, button: discord.ui.Button):
         cfg = store.cfg(self.guild_id)
         if not cfg.get("intro_fields"):
@@ -495,9 +551,13 @@ class SettingsView(discord.ui.View):
         opts = [discord.SelectOption(label=f["label"], value=f["label"]) for f in cfg["intro_fields"]]
         await interaction.response.send_message("削除する項目を選んでね:", view=_delete_select("項目を選ぶ", "del_intro", opts, _pick), ephemeral=True)
 
-    @discord.ui.button(label="順番を変更", emoji="↕️", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="順番を変更", emoji="↕️", style=discord.ButtonStyle.secondary, row=2)
     async def reorder_intro(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._start_reorder(interaction, "intro_fields", "自己紹介項目")
+
+    @discord.ui.button(label="パネル内容を編集", emoji="📝", style=discord.ButtonStyle.secondary, row=2)
+    async def edit_intro_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(IntroPanelTextModal(self.guild_id))
 
     @discord.ui.button(label="現在の設定を表示", style=discord.ButtonStyle.secondary, row=4)
     async def show(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -522,7 +582,7 @@ class SettingsView(discord.ui.View):
 def build_settings_embed(cfg: dict) -> discord.Embed:
     return discord.Embed(
         title="⚙️ BOT設定（管理者用）",
-        description="募集項目・ロールカテゴリ・認証ロール・NGワードをここから変更できます。\n変更はその場で保存され、再起動は不要です。",
+        description="募集項目・ロールカテゴリ・自己紹介項目・各パネルの文章・認証ロール・NGワードをここから変更できます。\n変更はその場で保存され、再起動は不要です。",
         color=discord.Color.purple(),
     )
 
