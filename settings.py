@@ -136,6 +136,66 @@ class EditCategoryModal(discord.ui.Modal, title="ロールカテゴリを編集"
         await interaction.response.send_message("カテゴリが見つからなかったよ（削除されたかも）。", ephemeral=True)
 
 
+class AddIntroFieldModal(discord.ui.Modal, title="自己紹介項目を追加"):
+    label = discord.ui.TextInput(label="項目名", max_length=30, placeholder="例: 好きな武器")
+    required = discord.ui.TextInput(label="必須ですか？（必須 / 任意）", max_length=5, default="任意", required=False)
+    style = discord.ui.TextInput(label="入力形式（1行 / 長文）", max_length=5, default="1行", required=False)
+
+    def __init__(self, guild_id):
+        super().__init__()
+        self.guild_id = guild_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = store.cfg(self.guild_id)
+        if len(cfg.get("intro_fields", [])) >= 5:
+            await interaction.response.send_message("自己紹介の項目は最大5つまでだよ（Discordのフォーム仕様）。", ephemeral=True)
+            return
+        name = str(self.label).strip()
+        if not name:
+            await interaction.response.send_message("項目名が空だったよ。", ephemeral=True)
+            return
+        if any(f["label"] == name for f in cfg["intro_fields"]):
+            await interaction.response.send_message("同じ名前の項目がすでにあるよ。", ephemeral=True)
+            return
+        cfg["intro_fields"].append({
+            "label": name,
+            "required": "必須" in str(self.required),
+            "long": "長文" in str(self.style),
+        })
+        store.save_config()
+        await interaction.response.send_message(f"✅ 自己紹介項目「{name}」を追加したよ（現在 {len(cfg['intro_fields'])} 項目）。", ephemeral=True)
+
+
+class EditIntroFieldModal(discord.ui.Modal, title="自己紹介項目を編集"):
+    def __init__(self, guild_id, field):
+        super().__init__()
+        self.guild_id = guild_id
+        self.orig_label = field["label"]
+        self.label = discord.ui.TextInput(label="項目名", max_length=30, default=field["label"])
+        self.required = discord.ui.TextInput(label="必須ですか？（必須 / 任意）", max_length=5, default="必須" if field.get("required") else "任意", required=False)
+        self.style = discord.ui.TextInput(label="入力形式（1行 / 長文）", max_length=5, default="長文" if field.get("long") else "1行", required=False)
+        self.add_item(self.label)
+        self.add_item(self.required)
+        self.add_item(self.style)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = store.cfg(self.guild_id)
+        name = str(self.label).strip()
+        for f in cfg["intro_fields"]:
+            if f["label"] == self.orig_label:
+                if name and name != self.orig_label and any(x["label"] == name for x in cfg["intro_fields"]):
+                    await interaction.response.send_message("同じ名前の項目がすでにあるよ。", ephemeral=True)
+                    return
+                if name:
+                    f["label"] = name
+                f["required"] = "必須" in str(self.required)
+                f["long"] = "長文" in str(self.style)
+                store.save_config()
+                await interaction.response.send_message(f"✅ 自己紹介項目「{f['label']}」を更新したよ。", ephemeral=True)
+                return
+        await interaction.response.send_message("項目が見つからなかったよ（削除されたかも）。", ephemeral=True)
+
+
 class RulesTextModal(discord.ui.Modal, title="ルール文章を変更"):
     def __init__(self, guild_id):
         super().__init__()
@@ -301,7 +361,49 @@ class SettingsView(discord.ui.View):
     async def add_ng(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AddNgWordModal(self.guild_id))
 
-    @discord.ui.button(label="現在の設定を表示", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="自己紹介項目を追加", style=discord.ButtonStyle.primary, row=3)
+    async def add_intro(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cfg = store.cfg(self.guild_id)
+        if len(cfg.get("intro_fields", [])) >= 5:
+            await interaction.response.send_message("自己紹介の項目は最大5つまでだよ（Discordのフォーム仕様）。", ephemeral=True)
+            return
+        await interaction.response.send_modal(AddIntroFieldModal(self.guild_id))
+
+    @discord.ui.button(label="自己紹介項目を編集", style=discord.ButtonStyle.secondary, row=3)
+    async def edit_intro(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cfg = store.cfg(self.guild_id)
+        if not cfg.get("intro_fields"):
+            await interaction.response.send_message("自己紹介項目は今ないよ。", ephemeral=True)
+            return
+
+        async def _pick(inter, value):
+            cfg2 = store.cfg(self.guild_id)
+            field = next((f for f in cfg2["intro_fields"] if f["label"] == value), None)
+            if field is None:
+                await inter.response.send_message("項目が見つからなかったよ。", ephemeral=True)
+                return
+            await inter.response.send_modal(EditIntroFieldModal(self.guild_id, field))
+
+        opts = [discord.SelectOption(label=f["label"], value=f["label"]) for f in cfg["intro_fields"]]
+        await interaction.response.send_message("編集する項目を選んでね:", view=_delete_select("項目を選ぶ", "edit_intro", opts, _pick), ephemeral=True)
+
+    @discord.ui.button(label="自己紹介項目を削除", style=discord.ButtonStyle.danger, row=3)
+    async def del_intro(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cfg = store.cfg(self.guild_id)
+        if not cfg.get("intro_fields"):
+            await interaction.response.send_message("自己紹介項目は今ないよ。", ephemeral=True)
+            return
+
+        async def _pick(inter, value):
+            cfg2 = store.cfg(self.guild_id)
+            cfg2["intro_fields"] = [f for f in cfg2["intro_fields"] if f["label"] != value]
+            store.save_config()
+            await inter.response.send_message(f"🗑️ 自己紹介項目「{value}」を削除したよ。", ephemeral=True)
+
+        opts = [discord.SelectOption(label=f["label"], value=f["label"]) for f in cfg["intro_fields"]]
+        await interaction.response.send_message("削除する項目を選んでね:", view=_delete_select("項目を選ぶ", "del_intro", opts, _pick), ephemeral=True)
+
+    @discord.ui.button(label="現在の設定を表示", style=discord.ButtonStyle.secondary, row=4)
     async def show(self, interaction: discord.Interaction, button: discord.ui.Button):
         cfg = store.cfg(self.guild_id)
         lines = [f"認証ロール: **{cfg['verify_role']}**", f"募集の自動終了: {cfg['recruit_expire_hours']}時間", "", "**募集項目**"]
@@ -311,6 +413,11 @@ class SettingsView(discord.ui.View):
         lines.append("**ロールカテゴリ**")
         for c in cfg["role_categories"]:
             lines.append(f"- {c['label']}: {' / '.join(c['roles'])}")
+        lines.append("")
+        dest = cfg.get("intro_channel_id")
+        lines.append(f"**自己紹介**（送信先: {f'<#{dest}>' if dest else '未設定'}）")
+        for f in cfg.get("intro_fields", []):
+            lines.append(f"- {f['label']}{'（必須）' if f.get('required') else ''}{'（長文）' if f.get('long') else ''}")
         lines.append("")
         lines.append(f"**NGワード**: {len(cfg['ng_words'])} 件")
         await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
