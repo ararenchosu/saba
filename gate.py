@@ -84,16 +84,16 @@ async def refresh_rules_panel(guild: discord.Guild) -> bool:
 
 # ---------------- ロール選択パネル ----------------
 class RoleSelect(discord.ui.Select):
-    """カテゴリ1つ分のロール選択（複数選択OK）。
-    選んだロールだけが付いている状態に同期する（選び直すと付け替え、全部外せば解除）。"""
+    """カテゴリ1つ分のロール選択（1つだけ選択可）。
+    選び直すと同じカテゴリの前のロールと付け替えになる。外すときはパネルのボタンから。"""
 
     def __init__(self, category: dict):
         self.category_label = category["label"]
         options = [discord.SelectOption(label=name, value=name) for name in category["roles"][:25]]
         super().__init__(
-            placeholder=f"{category['label']}（複数選択OK）",
-            min_values=0,
-            max_values=len(options),
+            placeholder=f"{category['label']} を選んでね",
+            min_values=1,
+            max_values=1,
             options=options,
             custom_id=f"rolesel:{category['label']}",
         )
@@ -105,41 +105,25 @@ class RoleSelect(discord.ui.Select):
             await interaction.response.send_message("⚠️ 設定が変わったみたい。新しいロールパネルを使ってね。", ephemeral=True)
             return
         member = interaction.user
-        selected = set(self.values)
-        added, removed, failed = [], [], []
+        value = self.values[0]
+        role = await get_or_create_role(interaction.guild, value)
+        if role is None:
+            await interaction.response.send_message("❌ ロールを作成できませんでした（BOTの権限不足）。管理者に連絡してください。", ephemeral=True)
+            return
+        # 同カテゴリの他のロールを外す（1カテゴリにつき1つまで）
         for name in cat["roles"]:
-            role = discord.utils.get(interaction.guild.roles, name=name)
-            has = role is not None and role in member.roles
-            if name in selected:
-                if role is None:
-                    role = await get_or_create_role(interaction.guild, name)
-                if role is None:
-                    failed.append(name)
-                elif not has:
-                    try:
-                        await member.add_roles(role)
-                        added.append(name)
-                    except discord.Forbidden:
-                        failed.append(name)
-            elif has:
+            other = discord.utils.get(interaction.guild.roles, name=name)
+            if other and other.id != role.id and other in member.roles:
                 try:
-                    await member.remove_roles(role)
-                    removed.append(name)
+                    await member.remove_roles(other)
                 except discord.Forbidden:
                     pass
-        parts = []
-        if added:
-            parts.append(f"付けた: {', '.join(added)}")
-        if removed:
-            parts.append(f"外した: {', '.join(removed)}")
-        msg = f"✅ 「{cat['label']}」を更新したよ。"
-        if parts:
-            msg += "（" + " / ".join(parts) + "）"
-        else:
-            msg += "（変更なし）"
-        if failed:
-            msg += f"\n❌ 権限不足で付けられなかった: {', '.join(failed)}（管理者に連絡してね）"
-        await interaction.response.send_message(msg, ephemeral=True)
+        try:
+            await member.add_roles(role)
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ ロールを付けられませんでした（BOTより上のロール）。管理者に連絡してください。", ephemeral=True)
+            return
+        await interaction.response.send_message(f"✅ 「{cat['label']}」→ {value} を付けたよ。", ephemeral=True)
 
 
 class RoleRemoveView(discord.ui.View):
