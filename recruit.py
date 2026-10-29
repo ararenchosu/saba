@@ -277,12 +277,29 @@ class RecruitPanelView(discord.ui.View):
         await interaction.response.send_modal(RecruitCommentModal(interaction.guild.id))
 
 
-def build_recruit_embed_panel() -> discord.Embed:
+def build_recruit_embed_panel(cfg: dict) -> discord.Embed:
     return discord.Embed(
         title="🎮 メンバー募集",
-        description="一緒に遊ぶ人を募集したいときは、下のボタンから募集を作成してね。\n募集は参加ボタンで集まって、満員 or 締め切りで終了します。",
+        description=cfg.get("recruit_panel_text") or "",
         color=discord.Color.green(),
     )
+
+
+async def refresh_recruit_panel(guild) -> bool:
+    """設置済みの募集パネルの文章を、現在の設定で書き換える。成功したら True"""
+    cfg = store.cfg(guild.id)
+    panel = cfg.get("panels", {}).get("recruit")
+    if not panel:
+        return False
+    ch = guild.get_channel(panel.get("channel_id"))
+    if ch is None:
+        return False
+    try:
+        msg = await ch.fetch_message(panel["message_id"])
+        await msg.edit(embed=build_recruit_embed_panel(cfg))  # ボタンはそのまま残る
+        return True
+    except Exception:
+        return False
 
 
 @tasks.loop(minutes=1)
@@ -303,7 +320,7 @@ async def expire_recruitments():
 async def cmd_setup_recruit(interaction: discord.Interaction):
     cfg = store.cfg(interaction.guild.id)
     cfg["recruit_channel_id"] = interaction.channel.id
-    await interaction.response.send_message(embed=build_recruit_embed_panel(), view=RecruitPanelView())
+    await interaction.response.send_message(embed=build_recruit_embed_panel(cfg), view=RecruitPanelView())
     msg = await interaction.original_response()
     cfg["panels"]["recruit"] = {"channel_id": interaction.channel.id, "message_id": msg.id}
     store.save_config()
