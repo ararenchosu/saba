@@ -78,6 +78,7 @@ async def on_ready():
     bot.add_view(RulesView())
     bot.add_view(RecruitPanelView())
     bot.add_view(IntroPanelView())
+    bot.add_view(settings.SettingsView())  # 設定パネルを永続化（再起動後もボタンが効く）
     for gid, cfg in store.configs.items():
         panels = cfg.get("panels", {})
         if "roles" in panels:
