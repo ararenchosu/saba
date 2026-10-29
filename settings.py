@@ -59,6 +59,82 @@ class AddCategoryModal(discord.ui.Modal, title="ロールカテゴリを追加")
         await interaction.response.send_message(f"✅ カテゴリ「{self.label}」を追加したよ。反映するにはロールパネルを /setup_roles で再設置してね。", ephemeral=True)
 
 
+class EditFieldModal(discord.ui.Modal, title="募集項目を編集"):
+    def __init__(self, guild_id, field):
+        super().__init__()
+        self.guild_id = guild_id
+        self.orig_label = field["label"]
+        self.label = discord.ui.TextInput(label="項目名", max_length=30, default=field["label"])
+        self.options = discord.ui.TextInput(
+            label="選択肢（カンマ区切り）",
+            style=discord.TextStyle.paragraph,
+            max_length=500,
+            default=", ".join(field["options"]),
+        )
+        self.add_item(self.label)
+        self.add_item(self.options)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = store.cfg(self.guild_id)
+        opts = _parse_list(str(self.options))[:25]
+        if not opts:
+            await interaction.response.send_message("選択肢が空だったよ。", ephemeral=True)
+            return
+        new_label = str(self.label).strip()
+        for f in cfg["recruit_fields"]:
+            if f["label"] == self.orig_label:
+                if new_label and new_label != self.orig_label and any(x["label"] == new_label for x in cfg["recruit_fields"]):
+                    await interaction.response.send_message("同じ名前の項目がすでにあるよ。", ephemeral=True)
+                    return
+                if new_label:
+                    f["label"] = new_label
+                f["options"] = opts
+                store.save_config()
+                await interaction.response.send_message(f"✅ 募集項目「{f['label']}」を更新したよ（選択肢: {', '.join(opts)}）。次の募集作成から反映されます。", ephemeral=True)
+                return
+        await interaction.response.send_message("項目が見つからなかったよ（削除されたかも）。", ephemeral=True)
+
+
+class EditCategoryModal(discord.ui.Modal, title="ロールカテゴリを編集"):
+    def __init__(self, guild_id, category):
+        super().__init__()
+        self.guild_id = guild_id
+        self.orig_label = category["label"]
+        self.label = discord.ui.TextInput(label="カテゴリ名", max_length=30, default=category["label"])
+        self.roles = discord.ui.TextInput(
+            label="ロール名（カンマ区切り）",
+            style=discord.TextStyle.paragraph,
+            max_length=500,
+            default=", ".join(category["roles"]),
+        )
+        self.add_item(self.label)
+        self.add_item(self.roles)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = store.cfg(self.guild_id)
+        names = _parse_list(str(self.roles))[:24]
+        if not names:
+            await interaction.response.send_message("ロール名が空だったよ。", ephemeral=True)
+            return
+        new_label = str(self.label).strip()
+        for c in cfg["role_categories"]:
+            if c["label"] == self.orig_label:
+                if new_label and new_label != self.orig_label and any(x["label"] == new_label for x in cfg["role_categories"]):
+                    await interaction.response.send_message("同じ名前のカテゴリがすでにあるよ。", ephemeral=True)
+                    return
+                if new_label:
+                    c["label"] = new_label
+                c["roles"] = names
+                store.save_config()
+                await interaction.response.send_message(
+                    f"✅ カテゴリ「{c['label']}」を更新したよ。反映するにはロールパネルを /setup_roles で再設置してね。\n"
+                    "※ ロール名を変えても、すでにあるDiscordロール自体の名前は変わりません（新しい名前のロールが別に作られます）。",
+                    ephemeral=True,
+                )
+                return
+        await interaction.response.send_message("カテゴリが見つからなかったよ（削除されたかも）。", ephemeral=True)
+
+
 class SetVerifyRoleModal(discord.ui.Modal, title="認証ロールを設定"):
     role_name = discord.ui.TextInput(label="ロール名（なければ自動作成）", max_length=50, placeholder="例: メンバー")
 
@@ -116,7 +192,25 @@ class SettingsView(discord.ui.View):
     async def add_field(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AddFieldModal(self.guild_id))
 
-    @discord.ui.button(label="募集項目を削除", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="募集項目を編集", style=discord.ButtonStyle.secondary, row=0)
+    async def edit_field(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cfg = store.cfg(self.guild_id)
+        if not cfg["recruit_fields"]:
+            await interaction.response.send_message("募集項目は今ないよ。", ephemeral=True)
+            return
+
+        async def _pick(inter, value):
+            cfg2 = store.cfg(self.guild_id)
+            field = next((f for f in cfg2["recruit_fields"] if f["label"] == value), None)
+            if field is None:
+                await inter.response.send_message("項目が見つからなかったよ。", ephemeral=True)
+                return
+            await inter.response.send_modal(EditFieldModal(self.guild_id, field))
+
+        opts = [discord.SelectOption(label=f["label"], value=f["label"]) for f in cfg["recruit_fields"]]
+        await interaction.response.send_message("編集する項目を選んでね:", view=_delete_select("項目を選ぶ", "edit_field", opts, _pick), ephemeral=True)
+
+    @discord.ui.button(label="募集項目を削除", style=discord.ButtonStyle.danger, row=0)
     async def del_field(self, interaction: discord.Interaction, button: discord.ui.Button):
         cfg = store.cfg(self.guild_id)
         if not cfg["recruit_fields"]:
@@ -136,7 +230,25 @@ class SettingsView(discord.ui.View):
     async def add_cat(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AddCategoryModal(self.guild_id))
 
-    @discord.ui.button(label="ロールカテゴリを削除", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="ロールカテゴリを編集", style=discord.ButtonStyle.secondary, row=1)
+    async def edit_cat(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cfg = store.cfg(self.guild_id)
+        if not cfg["role_categories"]:
+            await interaction.response.send_message("カテゴリは今ないよ。", ephemeral=True)
+            return
+
+        async def _pick(inter, value):
+            cfg2 = store.cfg(self.guild_id)
+            cat = next((c for c in cfg2["role_categories"] if c["label"] == value), None)
+            if cat is None:
+                await inter.response.send_message("カテゴリが見つからなかったよ。", ephemeral=True)
+                return
+            await inter.response.send_modal(EditCategoryModal(self.guild_id, cat))
+
+        opts = [discord.SelectOption(label=c["label"], value=c["label"]) for c in cfg["role_categories"]]
+        await interaction.response.send_message("編集するカテゴリを選んでね:", view=_delete_select("カテゴリを選ぶ", "edit_cat", opts, _pick), ephemeral=True)
+
+    @discord.ui.button(label="ロールカテゴリを削除", style=discord.ButtonStyle.danger, row=1)
     async def del_cat(self, interaction: discord.Interaction, button: discord.ui.Button):
         cfg = store.cfg(self.guild_id)
         if not cfg["role_categories"]:
