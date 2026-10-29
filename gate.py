@@ -106,6 +106,14 @@ class RoleSelect(discord.ui.Select):
             return
         member = interaction.user
         value = self.values[0]
+        # 1回限りロールのチェック: 取得済みで今付けていない人は再取得できない
+        if value in cat.get("once_roles", []):
+            claimed = cfg.get("claimed_once", {})
+            if member.id in claimed.get(value, []):
+                held = discord.utils.get(interaction.guild.roles, name=value)
+                if held is None or held not in member.roles:
+                    await interaction.response.send_message(f"⚠️ 「{value}」は1回限りのロールで、あなたは取得済みだよ。", ephemeral=True)
+                    return
         role = await get_or_create_role(interaction.guild, value)
         if role is None:
             await interaction.response.send_message("❌ ロールを作成できませんでした（BOTの権限不足）。管理者に連絡してください。", ephemeral=True)
@@ -123,6 +131,12 @@ class RoleSelect(discord.ui.Select):
         except discord.Forbidden:
             await interaction.response.send_message("❌ ロールを付けられませんでした（BOTより上のロール）。管理者に連絡してください。", ephemeral=True)
             return
+        # 1回限りロールは取得を記録する
+        if value in cat.get("once_roles", []):
+            claimed = cfg.setdefault("claimed_once", {})
+            if member.id not in claimed.setdefault(value, []):
+                claimed[value].append(member.id)
+                store.save_config()
         await interaction.response.send_message(f"✅ 「{cat['label']}」→ {value} を付けたよ。", ephemeral=True)
 
 
@@ -181,7 +195,9 @@ class RolePanelView(discord.ui.View):
 def build_roles_embed(cfg: dict) -> discord.Embed:
     lines = [cfg.get("roles_panel_text") or "", ""]
     for cat in cfg["role_categories"]:
-        lines.append(f"**{cat['label']}**: {' / '.join(cat['roles'])}")
+        once = set(cat.get("once_roles", []))
+        names = " / ".join(f"{r}（1回限り）" if r in once else r for r in cat["roles"])
+        lines.append(f"**{cat['label']}**: {names}")
     embed = discord.Embed(title="🏷️ ロール選択", description="\n".join(lines), color=discord.Color.blue())
     return embed
 
