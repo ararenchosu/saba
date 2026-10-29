@@ -67,7 +67,8 @@ class RecruitCardView(discord.ui.View):
     def _rec(self):
         return store.recruitments.get(self.rid)
 
-    async def _refresh(self, interaction: discord.Interaction, rec: dict):
+    async def _update_card(self, interaction: discord.Interaction, rec: dict):
+        # ※ discord.ui.View 内部の _refresh と名前が衝突すると BOT が落ちるのでこの名前にしている
         full = len(rec["participants"]) >= recruit_capacity(rec)
         await interaction.message.edit(embed=build_recruit_embed(rec), view=None if full else self)
 
@@ -86,7 +87,7 @@ class RecruitCardView(discord.ui.View):
         rec["participants"].append(uid)
         store.save_recruitments()
         await interaction.response.defer()
-        await self._refresh(interaction, rec)
+        await self._update_card(interaction, rec)
         if len(rec["participants"]) >= recruit_capacity(rec):
             ch = interaction.channel
             if ch:
@@ -107,7 +108,7 @@ class RecruitCardView(discord.ui.View):
         rec["participants"].remove(uid)
         store.save_recruitments()
         await interaction.response.defer()
-        await self._refresh(interaction, rec)
+        await self._update_card(interaction, rec)
 
     async def _close(self, interaction: discord.Interaction):
         rec = self._rec()
@@ -256,7 +257,14 @@ class RecruitCreateView(discord.ui.View):
         store.recruitments[rid] = rec
         store.save_recruitments()
         bot.add_view(view, message_id=msg.id)
-        await interaction.response.edit_message(content=f"✅ 募集を投稿したよ → {msg.jump_url}", view=None)
+        try:
+            await interaction.response.edit_message(content=f"✅ 募集を投稿したよ → {msg.jump_url}", view=None)
+        except Exception:
+            # 投稿自体は完了しているので、確認表示の通信が切れても落とさない
+            try:
+                await interaction.followup.send(f"✅ 募集を投稿したよ → {msg.jump_url}", ephemeral=True)
+            except Exception:
+                pass
         self.stop()
 
 
