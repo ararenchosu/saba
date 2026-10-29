@@ -250,6 +250,83 @@ class AddNgWordModal(discord.ui.Modal, title="NGワードを追加"):
         await interaction.response.send_message(f"✅ NGワードに「{w}」を追加したよ（現在 {len(cfg['ng_words'])} 件）。", ephemeral=True)
 
 
+class MoveItemView(discord.ui.View):
+    """順番変更の2ステップ目: 移動先を選ぶ"""
+
+    def __init__(self, guild_id, cfg_key, title, index):
+        super().__init__(timeout=180)
+        self.guild_id = guild_id
+        self.cfg_key = cfg_key
+        self.title = title
+        self.index = index
+
+    def _move(self, new_index):
+        cfg = store.cfg(self.guild_id)
+        items = cfg.get(self.cfg_key, [])
+        if not (0 <= self.index < len(items)):
+            return None
+        item = items.pop(self.index)
+        new_index = max(0, min(new_index, len(items)))
+        items.insert(new_index, item)
+        cfg[self.cfg_key] = items
+        store.save_config()
+        return items
+
+    async def _done(self, interaction: discord.Interaction, items):
+        order = "\n".join(f"{i + 1}. {it['label']}" for i, it in enumerate(items))
+        note = "\n※ ロールカテゴリの並びは /setup_roles でパネルを再設置すると反映されます。" if self.cfg_key == "role_categories" else ""
+        await interaction.response.edit_message(content=f"✅ {self.title} の順番を変更したよ:\n{order}{note}", view=None)
+
+    @discord.ui.button(label="先頭へ", emoji="⏫", style=discord.ButtonStyle.secondary)
+    async def to_top(self, interaction: discord.Interaction, button: discord.ui.Button):
+        items = self._move(0)
+        if items is not None:
+            await self._done(interaction, items)
+
+    @discord.ui.button(label="1つ上へ", emoji="⬆️", style=discord.ButtonStyle.secondary)
+    async def up(self, interaction: discord.Interaction, button: discord.ui.Button):
+        items = self._move(self.index - 1)
+        if items is not None:
+            await self._done(interaction, items)
+
+    @discord.ui.button(label="1つ下へ", emoji="⬇️", style=discord.ButtonStyle.secondary)
+    async def down(self, interaction: discord.Interaction, button: discord.ui.Button):
+        items = self._move(self.index + 1)
+        if items is not None:
+            await self._done(interaction, items)
+
+    @discord.ui.button(label="最後尾へ", emoji="⏬", style=discord.ButtonStyle.secondary)
+    async def to_bottom(self, interaction: discord.Interaction, button: discord.ui.Button):
+        items = self._move(10 ** 9)
+        if items is not None:
+            await self._done(interaction, items)
+
+
+class ReorderSelectView(discord.ui.View):
+    """順番変更の1ステップ目: 動かす項目を選ぶ"""
+
+    def __init__(self, guild_id, cfg_key, title):
+        super().__init__(timeout=180)
+        self.guild_id = guild_id
+        self.cfg_key = cfg_key
+        self.title = title
+        cfg = store.cfg(guild_id)
+        items = cfg.get(cfg_key, [])
+        sel = discord.ui.Select(
+            placeholder="動かす項目を選んでね",
+            options=[discord.SelectOption(label=f"{i + 1}. {it['label']}", value=str(i)) for i, it in enumerate(items)],
+        )
+        sel.callback = self._picked
+        self.add_item(sel)
+
+    async def _picked(self, interaction: discord.Interaction):
+        idx = int(interaction.data["values"][0])
+        cfg = store.cfg(self.guild_id)
+        items = cfg.get(self.cfg_key, [])
+        name = items[idx]["label"] if 0 <= idx < len(items) else "?"
+        await interaction.response.send_message(f"「{name}」をどこへ移動する？", view=MoveItemView(self.guild_id, self.cfg_key, self.title, idx), ephemeral=True)
+
+
 def _delete_select(placeholder, custom_id, options, on_pick):
     sel = discord.ui.Select(placeholder=placeholder, options=options, custom_id=custom_id)
 
@@ -272,6 +349,13 @@ class SettingsView(discord.ui.View):
             await interaction.response.send_message("設定は管理者だけだよ。", ephemeral=True)
             return False
         return True
+
+    async def _start_reorder(self, interaction: discord.Interaction, cfg_key: str, title: str):
+        cfg = store.cfg(self.guild_id)
+        if len(cfg.get(cfg_key, [])) < 2:
+            await interaction.response.send_message("順番を変えるには項目が2つ以上必要だよ。", ephemeral=True)
+            return
+        await interaction.response.send_message(f"{title}：順番を変える項目を選んでね:", view=ReorderSelectView(self.guild_id, cfg_key, title), ephemeral=True)
 
     @discord.ui.button(label="募集項目を追加", style=discord.ButtonStyle.primary, row=0)
     async def add_field(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -311,6 +395,10 @@ class SettingsView(discord.ui.View):
         opts = [discord.SelectOption(label=f["label"], value=f["label"]) for f in cfg["recruit_fields"]]
         await interaction.response.send_message("削除する項目を選んでね:", view=_delete_select("項目を選ぶ", "del_field", opts, _pick), ephemeral=True)
 
+    @discord.ui.button(label="順番を変更", emoji="↕️", style=discord.ButtonStyle.secondary, row=0)
+    async def reorder_field(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._start_reorder(interaction, "recruit_fields", "募集項目")
+
     @discord.ui.button(label="ロールカテゴリを追加", style=discord.ButtonStyle.primary, row=1)
     async def add_cat(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AddCategoryModal(self.guild_id))
@@ -348,6 +436,10 @@ class SettingsView(discord.ui.View):
 
         opts = [discord.SelectOption(label=c["label"], value=c["label"]) for c in cfg["role_categories"]]
         await interaction.response.send_message("削除するカテゴリを選んでね:", view=_delete_select("カテゴリを選ぶ", "del_cat", opts, _pick), ephemeral=True)
+
+    @discord.ui.button(label="順番を変更", emoji="↕️", style=discord.ButtonStyle.secondary, row=1)
+    async def reorder_cat(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._start_reorder(interaction, "role_categories", "ロールカテゴリ")
 
     @discord.ui.button(label="ルール文章を変更", style=discord.ButtonStyle.primary, row=2)
     async def edit_rules(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -402,6 +494,10 @@ class SettingsView(discord.ui.View):
 
         opts = [discord.SelectOption(label=f["label"], value=f["label"]) for f in cfg["intro_fields"]]
         await interaction.response.send_message("削除する項目を選んでね:", view=_delete_select("項目を選ぶ", "del_intro", opts, _pick), ephemeral=True)
+
+    @discord.ui.button(label="順番を変更", emoji="↕️", style=discord.ButtonStyle.secondary, row=3)
+    async def reorder_intro(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._start_reorder(interaction, "intro_fields", "自己紹介項目")
 
     @discord.ui.button(label="現在の設定を表示", style=discord.ButtonStyle.secondary, row=4)
     async def show(self, interaction: discord.Interaction, button: discord.ui.Button):
