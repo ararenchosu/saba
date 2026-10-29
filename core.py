@@ -69,6 +69,7 @@ DEFAULT_CONFIG = {
         {"label": "一言", "required": False, "long": True},
     ],
     # 設置済みパネル（再起動後にボタンを復旧するため）
+    "claimed_once": {},  # 1回限りロールの取得履歴 {ロール名: [取得したユーザーID]}
     "panels": {},  # {"rules": {"channel_id":..,"message_id":..}, "roles": {...}, "recruit": {...}}
 }
 
