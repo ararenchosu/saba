@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-gate.py — 入口まわり: ウェルカム / ルール同意ゲート / ロール選択パネル / ゲート権限設定
+gate.py — 入口まわり: ルール同意ゲート / ロール選択パネル / ゲート権限設定
 """
 
 import discord
@@ -8,29 +8,6 @@ from discord import app_commands
 from discord.ext import commands
 
 from sub.core import bot, store, get_or_create_role
-
-# ---------------- ウェルカム ----------------
-@bot.listen("on_member_join")
-async def on_member_join(member: discord.Member):
-    cfg = store.cfg(member.guild.id)
-    ch = None
-    if cfg.get("welcome_channel_id"):
-        ch = member.guild.get_channel(cfg["welcome_channel_id"])
-    if ch is None:
-        ch = member.guild.system_channel
-    if ch is None:
-        return
-    rules_hint = ""
-    panel = cfg.get("panels", {}).get("rules")
-    if panel and panel.get("channel_id"):
-        rules_hint = f"\nまずは <#{panel['channel_id']}> でルールを確認して、同意ボタンを押してね。"
-    try:
-        await ch.send(
-            f"🎉 {member.mention} さん、**{member.guild.name}** へようこそ！{rules_hint}\n"
-            "ロール選択でランク帯やプレイスタイルを設定すると、募集で一緒に行く人が見つけやすくなるよ。"
-        )
-    except Exception:
-        pass
 
 # ---------------- ルール同意ゲート ----------------
 class RulesView(discord.ui.View):
@@ -261,13 +238,13 @@ async def cmd_setup_roles(interaction: discord.Interaction):
     await interaction.followup.send("✅ ロール選択パネルを設置しました。", ephemeral=True)
 
 
-@bot.tree.command(name="setwelcome", description="このチャンネルをウェルカム投稿先に設定する（管理者用）")
+@bot.tree.command(name="setwelcome", description="このチャンネルを入退室メッセージの投稿先に設定する（管理者用）")
 @app_commands.checks.has_permissions(administrator=True)
 async def cmd_setwelcome(interaction: discord.Interaction):
     cfg = store.cfg(interaction.guild.id)
     cfg["welcome_channel_id"] = interaction.channel.id
     store.save_config()
-    await interaction.response.send_message("✅ このチャンネルをウェルカム投稿先にしました。", ephemeral=True)
+    await interaction.response.send_message("✅ このチャンネルを入退室メッセージの投稿先にしました。", ephemeral=True)
 
 
 @bot.tree.command(name="setup_gate", description="認証ロールでチャンネルを隠すゲート権限を一括適用する（管理者用）")
