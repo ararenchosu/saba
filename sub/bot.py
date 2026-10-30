@@ -26,6 +26,7 @@ from sub.gate import RulesView, RolePanelView
 from sub.recruit import RecruitPanelView, RecruitCardView, expire_recruitments
 from sub.intro import IntroPanelView
 from sub.tickets import TicketPanelView, TicketCloseView
+from sub.invites import InvitePanelView
 from sub.utility import PollView, GiveawayView, utility_loop
 from sub.userdata import utility as utility_store
 
@@ -100,6 +101,7 @@ async def on_ready():
     bot.add_view(settings.SettingsView())  # 設定パネルを永続化（再起動後もボタンが効く）
     bot.add_view(TicketPanelView())
     bot.add_view(TicketCloseView())
+    bot.add_view(InvitePanelView())
     # 進行中の投票・抽選のボタンを復旧
     for mid in utility_store.data.get("polls", {}):
         try:
