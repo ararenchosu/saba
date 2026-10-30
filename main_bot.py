@@ -16,6 +16,7 @@ import recruit  # noqa: F401
 import settings  # noqa: F401
 import moderation  # noqa: F401
 import intro  # noqa: F401
+import invites  # noqa: F401  （招待トラッキング）
 from gate import RulesView, RolePanelView
 from recruit import RecruitPanelView, RecruitCardView, expire_recruitments
 from intro import IntroPanelView
