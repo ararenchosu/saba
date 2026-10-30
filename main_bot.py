@@ -43,7 +43,9 @@ async def cmd_help(interaction: discord.Interaction):
 
 @bot.tree.error
 async def on_tree_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
+    if isinstance(error, app_commands.CheckFailure) and not isinstance(error, app_commands.MissingPermissions):
+        text = "このBOTの担当サーバーではないため、このサーバーでは動作しません。"
+    elif isinstance(error, app_commands.MissingPermissions):
         text = "そのコマンドは管理者だけだよ。"
     else:
         text = "エラーが発生しました。時間をおいてもう一度試してね。"
