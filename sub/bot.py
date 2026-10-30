@@ -66,74 +66,10 @@ async def cmd_help(interaction: discord.Interaction):
 
 @bot.tree.error
 async def on_tree_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
+    if isinstance(error, app_commands.CheckFailure) and not isinstance(error, app_commands.MissingPermissions):
+        text = "このBOTの担当サーバーではないため、このサーバーでは動作しません。"
+    elif isinstance(error, app_commands.MissingPermissions):
         text = "そのコマンドは管理者だけだよ。"
     else:
         text = "エラーが発生しました。時間をおいてもう一度試してね。"
         print(f"tree error: {error}")
-    try:
-        if interaction.response.is_done():
-            await interaction.followup.send(text, ephemeral=True)
-        else:
-            await interaction.response.send_message(text, ephemeral=True)
-    except Exception:
-        pass
-
-
-
-# ---------------- 起動・復旧 ----------------
-@bot.event
-async def on_ready():
-    print(f"ログイン完了: {bot.user} (ID: {bot.user.id})")
-    # スラッシュコマンドを同期
-    try:
-        synced = await bot.tree.sync()
-        print(f"スラッシュコマンド同期: {len(synced)}件")
-    except Exception as e:
-        print(f"スラッシュコマンド同期失敗: {e}")
-    # 設置済みパネルのボタンを復旧
-    bot.add_view(RulesView())
-    bot.add_view(RecruitPanelView())
-    bot.add_view(IntroPanelView())
-    bot.add_view(settings.SettingsView())  # 設定パネルを永続化（再起動後もボタンが効く）
-    bot.add_view(TicketPanelView())
-    bot.add_view(TicketCloseView())
-    # 進行中の投票・抽選のボタンを復旧
-    for mid in utility_store.data.get("polls", {}):
-        try:
-            bot.add_view(PollView(int(mid)), message_id=int(mid))
-        except Exception as e:
-            print(f"投票復旧失敗 mid={mid}: {e}")
-    for mid, rec in utility_store.data.get("giveaways", {}).items():
-        if not rec.get("ended"):
-            try:
-                bot.add_view(GiveawayView(int(mid)), message_id=int(mid))
-            except Exception as e:
-                print(f"抽選復旧失敗 mid={mid}: {e}")
-    if not utility_loop.is_running():
-        utility_loop.start()
-    for gid, cfg in store.configs.items():
-        panels = cfg.get("panels", {})
-        if "roles" in panels:
-            try:
-                bot.add_view(RolePanelView(cfg), message_id=panels["roles"]["message_id"])
-            except Exception as e:
-                print(f"ロールパネル復旧失敗 guild={gid}: {e}")
-    # 進行中の募集カードのボタンを復旧
-    for rid, rec in store.recruitments.items():
-        if rec.get("status") == "open" and rec.get("message_id"):
-            try:
-                bot.add_view(RecruitCardView(rid), message_id=rec["message_id"])
-            except Exception as e:
-                print(f"募集カード復旧失敗 rid={rid}: {e}")
-    if not expire_recruitments.is_running():
-        expire_recruitments.start()
-    print("------ サブBOT（本格用） 起動完了 ------")
-
-
-async def start():
-    """サブBOTを起動する（ランチャー main.py から呼ばれる）"""
-    if not TOKEN:
-        print("⚠️ サブBOTのトークン（SUB_DISCORD_TOKEN）が未設定のため、サブBOTは起動しません。")
-        return
-    await bot.start(TOKEN)
