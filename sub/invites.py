@@ -372,3 +372,113 @@ async def cmd_invites(interaction: discord.Interaction):
         ch = f"#{i.channel.name}" if i.channel else "-"
         lines.append(f"- `discord.gg/{i.code}` 作成者: {inviter} / 使用 {i.uses or 0} 回 / 対象: {ch}")
     await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
+
+
+# ---------------- 招待リンク作成パネル ----------------
+AGE_OPTIONS = [(1800, "30分"), (3600, "1時間"), (21600, "6時間"), (43200, "12時間"), (86400, "24時間"), (604800, "7日"), (0, "無期限")]
+USES_OPTIONS = [(1, "1回"), (5, "5回"), (10, "10回"), (25, "25回"), (50, "50回"), (100, "100回"), (0, "無制限")]
+
+
+def _expiry_text(max_age: int) -> str:
+    if max_age == 0:
+        return "無期限"
+    until = datetime.now(JST) + timedelta(seconds=max_age)
+    label = dict(AGE_OPTIONS)[max_age]
+    return f"{until.strftime('%Y-%m-%d %H:%M')} まで（{label}）"
+
+
+class InvitePanelView(discord.ui.View):
+    """設置パネル（永続）。ボタンで作成フロー（自分だけ見える）を開く"""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🎟 招待リンクを作成", style=discord.ButtonStyle.primary, custom_id="invite_create_open")
+    async def open_flow(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None or not is_home(interaction.guild.id):
+            await interaction.response.send_message("このBOTの担当サーバーではありません。", ephemeral=True)
+            return
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("招待リンクを作成できるのは管理者だけです。", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "有効時間と使用可能回数を選んでから「作成する」を押してね。リンクはDMに届きます。",
+            view=InviteCreateView(interaction.channel),
+            ephemeral=True,
+        )
+
+
+class InviteCreateView(discord.ui.View):
+    def __init__(self, channel):
+        super().__init__(timeout=300)
+        self.channel = channel
+        self.max_age = 86400
+        self.max_uses = 0
+        self.age_select = discord.ui.Select(
+            placeholder="有効時間を選ぶ（デフォルト: 24時間）",
+            options=[discord.SelectOption(label=label, value=str(v)) for v, label in AGE_OPTIONS],
+        )
+        self.age_select.callback = self._on_age
+        self.uses_select = discord.ui.Select(
+            placeholder="使用可能回数を選ぶ（デフォルト: 無制限）",
+            options=[discord.SelectOption(label=label, value=str(v)) for v, label in USES_OPTIONS],
+        )
+        self.uses_select.callback = self._on_uses
+        create_btn = discord.ui.Button(label="🎟 作成する", style=discord.ButtonStyle.success)
+        create_btn.callback = self._on_create
+        self.add_item(self.age_select)
+        self.add_item(self.uses_select)
+        self.add_item(create_btn)
+
+    async def _on_age(self, interaction: discord.Interaction):
+        self.max_age = int(self.age_select.values[0])
+        await interaction.response.defer()
+
+    async def _on_uses(self, interaction: discord.Interaction):
+        self.max_uses = int(self.uses_select.values[0])
+        await interaction.response.defer()
+
+    async def _on_create(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            invite = await self.channel.create_invite(
+                max_age=self.max_age,
+                max_uses=self.max_uses,
+                unique=True,
+                reason=f"招待作成パネル: {interaction.user} が作成",
+            )
+        except discord.Forbidden:
+            await interaction.followup.send("❌ 招待を作成できませんでした。BOTにこのチャンネルの「招待を作成」権限が必要です。", ephemeral=True)
+            return
+        age_label = dict(AGE_OPTIONS)[self.max_age]
+        uses_label = dict(USES_OPTIONS)[self.max_uses]
+        expires = _expiry_text(self.max_age)
+        dm_text = (
+            f"🎟 **{interaction.guild.name}** の招待リンクを作成しました\n{invite.url}\n"
+            f"・有効期限: {expires}\n・使用可能回数: {uses_label}\n・対象チャンネル: #{self.channel.name}"
+        )
+        dm_ok = True
+        try:
+            await interaction.user.send(dm_text)
+        except Exception:
+            dm_ok = False
+        await log_event(interaction.guild, f"🎟 {interaction.user.mention} が招待を作成しました: `discord.gg/{invite.code}`（有効時間: {age_label} / 回数: {uses_label}）")
+        if dm_ok:
+            await interaction.followup.send("✅ 招待リンクをDMに送りました。DMを確認してね。", ephemeral=True)
+        else:
+            await interaction.followup.send(
+                f"DMを送れなかったので、ここに表示します（このメッセージはあなたにだけ見えています）:\n{invite.url}\n・有効期限: {expires}\n・使用可能回数: {uses_label}",
+                ephemeral=True,
+            )
+
+
+@bot.tree.command(name="setup_invite", description="このチャンネルに招待リンク作成パネルを設置する（管理者用）")
+@app_commands.checks.has_permissions(administrator=True)
+async def cmd_setup_invite(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🎟 招待リンク作成",
+        description="ボタンを押すと、有効時間と使用可能回数を選んで招待リンクを作成できます。\n作成したリンクはあなたのDMに届きます。（作成できるのは管理者だけです）",
+        color=discord.Color.blurple(),
+    )
+    await interaction.channel.send(embed=embed, view=InvitePanelView())
+    await interaction.response.send_message("✅ 招待リンク作成パネルを設置しました。", ephemeral=True)
