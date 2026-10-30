@@ -20,6 +20,7 @@ import invites  # noqa: F401  （招待トラッキング）
 from gate import RulesView, RolePanelView
 from recruit import RecruitPanelView, RecruitCardView, expire_recruitments
 from intro import IntroPanelView
+from invites import InvitePanelView
 
 @bot.tree.command(name="bothelp", description="コマンド一覧を表示する")
 async def cmd_help(interaction: discord.Interaction):
@@ -75,6 +76,7 @@ async def on_ready():
     bot.add_view(RecruitPanelView())
     bot.add_view(IntroPanelView())
     bot.add_view(settings.SettingsView())  # 設定パネルを永続化（再起動後もボタンが効く）
+    bot.add_view(InvitePanelView())
     for gid, cfg in store.configs.items():
         panels = cfg.get("panels", {})
         if "roles" in panels:
