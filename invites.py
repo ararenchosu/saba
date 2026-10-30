@@ -1,18 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-invites.py — 招待トラッキング（メインBOT）
+invites.py — 招待トラッキング＋入退室ログ（メインBOT）
 
-誰が・どの招待コードから入ってきたかを特定して、ログチャンネルに記録する。
+入室・退出を、スクショのような詳細Embedでログチャンネルに記録する。
+入室Embedには「どの招待コードから入ったか（作成者つき）」も載せる。
 仕組み: 招待ごとの使用回数を控えておき、入室時に増えたコードを突き止める。
-- BOTに「サーバーの管理」権限がないと招待一覧を取得できない（その場合は記録できない）
-- バニティURL・ウィジェット・サーバー発見からの入室はコードが増えないので「特定不可」になる
-- /invites … 現在有効な招待の一覧（コード・作成者・使用回数）を確認できる
+- BOTに「サーバーの管理」権限がないと招待一覧を取得できず、招待元は「取得不可」になる
+- バニティURL・ウィジェット・サーバー発見からの入室は「特定できませんでした」になる
+- /invites … 現在有効な招待の一覧（コード・作成者・使用回数）
 """
+
+from datetime import datetime, timedelta, timezone
 
 import discord
 from discord import app_commands
 
-from core import bot, store, log_event
+from core import bot, store
+
+JST = timezone(timedelta(hours=9))
 
 _cache = {}  # guild_id -> {code: {"uses": int, "inviter_id": int|None}}
 
@@ -35,6 +40,58 @@ def _find_used(before: dict, after: dict):
         if info["uses"] > prev:
             return code, info
     return None, None
+
+
+def _target_channel(guild):
+    """入退室Embedの投稿先。/setwelcome で指定されたチャンネルだけ（未指定なら投稿しない）"""
+    cfg = store.cfg(guild.id)
+    if cfg.get("welcome_channel_id"):
+        return guild.get_channel(cfg["welcome_channel_id"])
+    return None
+
+
+def _created_text(member) -> str:
+    created = member.created_at.astimezone(JST)
+    days = (datetime.now(JST) - created).days
+    return f"{created.strftime('%Y-%m-%d %H:%M:%S')} JST\n（約{days}日前）", days
+
+
+def _footer(guild) -> str:
+    now = datetime.now(JST)
+    return f"サーバーID: {guild.id} | {now.year}/{now.month:02d}/{now.day:02d}, {now.hour}:{now.minute:02d}"
+
+
+def build_join_embed(member, invite_text: str) -> discord.Embed:
+    created_text, days = _created_text(member)
+    embed = discord.Embed(description="📥 メンバーが参加しました！", color=discord.Color.green())
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="ユーザー名", value=f"{member.mention}\n`{member.display_name}`", inline=False)
+    embed.add_field(name="ユーザーID", value=f"`{member.id}`", inline=False)
+    embed.add_field(name="アカウント作成日", value=created_text, inline=False)
+    embed.add_field(name="作成からの経過", value=f"{days}日", inline=False)
+    embed.add_field(name="アカウント種類", value="🤖 Bot" if member.bot else "👤 ユーザー", inline=False)
+    embed.add_field(name="使用した招待", value=invite_text, inline=False)
+    embed.add_field(name="👥 サーバー総人数", value=f"{member.guild.member_count}人", inline=False)
+    embed.set_footer(text=_footer(member.guild))
+    return embed
+
+
+def build_leave_embed(member) -> discord.Embed:
+    created_text, days = _created_text(member)
+    embed = discord.Embed(description="📤 メンバーが退出しました！", color=discord.Color.red())
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="ユーザー名", value=f"{member.mention}\n`{member.display_name}`", inline=False)
+    embed.add_field(name="ユーザーID", value=f"`{member.id}`", inline=False)
+    embed.add_field(name="アカウント作成日", value=created_text, inline=False)
+    embed.add_field(name="作成からの経過", value=f"{days}日", inline=False)
+    embed.add_field(name="アカウント種類", value="🤖 Bot" if member.bot else "👤 ユーザー", inline=False)
+    if member.joined_at:
+        joined = member.joined_at.astimezone(JST)
+        stay = (datetime.now(JST) - joined).days
+        embed.add_field(name="サーバー参加日", value=f"{joined.strftime('%Y-%m-%d %H:%M:%S')} JST\n（在籍 {stay} 日）", inline=False)
+    embed.add_field(name="👥 サーバー総人数", value=f"{member.guild.member_count}人", inline=False)
+    embed.set_footer(text=_footer(member.guild))
+    return embed
 
 
 @bot.listen("on_ready")
@@ -64,19 +121,42 @@ async def _track_join(member: discord.Member):
     cfg = store.cfg(guild.id)
     if not cfg.get("invite_track_enabled", True):
         return
+    ch = _target_channel(guild)
+    if ch is None:
+        return
     before = _cache.get(guild.id)
     after = await _snapshot(guild)
     if after is None:
-        return  # 権限不足などで招待一覧が取れない
-    code, info = (None, None)
-    if before is not None:
-        code, info = _find_used(before, after)
-    _cache[guild.id] = after
-    if code:
-        inviter = f"<@{info['inviter_id']}>" if info and info.get("inviter_id") else "不明"
-        await log_event(guild, f"📥 入室: {member.mention}（ID: {member.id}）\n招待コード `{code}` から入室（作成者: {inviter} / この招待の累計使用回数: {info['uses']} 回）")
+        invite_text = "取得できませんでした（BOTに「サーバーの管理」権限が必要です）"
     else:
-        await log_event(guild, f"📥 入室: {member.mention}（ID: {member.id}）\n招待元は特定できませんでした（バニティURL・ウィジェット・サーバー発見など、通常の招待コード経由ではない可能性）")
+        code, info = (None, None)
+        if before is not None:
+            code, info = _find_used(before, after)
+        _cache[guild.id] = after
+        if code:
+            inviter = f"<@{info['inviter_id']}>" if info and info.get("inviter_id") else "不明"
+            invite_text = f"`discord.gg/{code}`（作成者: {inviter} / この招待の累計使用回数: {info['uses']} 回）"
+        else:
+            invite_text = "特定できませんでした（バニティURL・ウィジェット・サーバー発見などの可能性）"
+    try:
+        await ch.send(embed=build_join_embed(member, invite_text))
+    except discord.Forbidden:
+        pass
+
+
+@bot.listen("on_member_remove")
+async def _track_leave(member: discord.Member):
+    guild = member.guild
+    cfg = store.cfg(guild.id)
+    if not cfg.get("invite_track_enabled", True):
+        return
+    ch = _target_channel(guild)
+    if ch is None:
+        return
+    try:
+        await ch.send(embed=build_leave_embed(member))
+    except discord.Forbidden:
+        pass
 
 
 @bot.tree.command(name="invites", description="現在有効な招待リンクの一覧を見る（管理者用）")
@@ -89,7 +169,6 @@ async def cmd_invites(interaction: discord.Interaction):
     if not snap:
         await interaction.response.send_message("現在有効な招待リンクはないよ。", ephemeral=True)
         return
-    # 最新情報で表示するために実データも取る
     invites = await interaction.guild.invites()
     lines = [f"**有効な招待 {len(invites)} 件**（使用回数が多いもの・作成者が不審なものが流出元候補）"]
     for i in sorted(invites, key=lambda x: x.uses or 0, reverse=True):
