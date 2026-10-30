@@ -61,7 +61,18 @@ def _footer(guild) -> str:
     return f"サーバーID: {guild.id} | {now.year}/{now.month:02d}/{now.day:02d}, {now.hour}:{now.minute:02d}"
 
 
-def build_join_embed(member, invite_text: str) -> discord.Embed:
+async def _fetch_invite(guild, code):
+    try:
+        invites = await guild.invites()
+    except discord.Forbidden:
+        return None
+    for i in invites:
+        if i.code == code:
+            return i
+    return None
+
+
+def build_join_embed(member, invite_text: str, guard_text: str = None) -> discord.Embed:
     created_text, days = _created_text(member)
     embed = discord.Embed(description="📥 メンバーが参加しました！", color=discord.Color.green())
     embed.set_thumbnail(url=member.display_avatar.url)
@@ -72,6 +83,8 @@ def build_join_embed(member, invite_text: str) -> discord.Embed:
     embed.add_field(name="アカウント種類", value="🤖 Bot" if member.bot else "👤 ユーザー", inline=False)
     embed.add_field(name="使用した招待", value=invite_text, inline=False)
     embed.add_field(name="👥 サーバー総人数", value=f"{member.guild.member_count}人", inline=False)
+    if guard_text:
+        embed.add_field(name="🛡 招待ガード", value=guard_text, inline=False)
     embed.set_footer(text=_footer(member.guild))
     return embed
 
@@ -108,6 +121,32 @@ async def _on_invite_create(invite: discord.Invite):
         "uses": invite.uses or 0,
         "inviter_id": invite.inviter.id if invite.inviter else None,
     }
+    # ---- 招待ガード: ONのサーバーでは、権限なしメンバーの招待を作成直後に無効化する ----
+    guild = invite.guild
+    if not is_home(guild.id):
+        return
+    cfg = store.cfg(guild.id)
+    if not cfg.get("invite_guard_enabled", False):
+        return
+    inviter = invite.inviter
+    if inviter is None or inviter.bot:
+        return
+    member = guild.get_member(inviter.id)
+    if member is None:
+        return  # 作成者の権限が確認できない場合は消さない（誤爆防止）
+    perms = member.guild_permissions
+    if perms.administrator or perms.manage_guild:
+        return  # 権限持ちの招待はOK
+    try:
+        await invite.delete()
+    except (discord.Forbidden, discord.NotFound):
+        return
+    _cache.get(guild.id, {}).pop(invite.code, None)
+    await log_event(guild, f"🛡 招待ガード: {inviter.mention} の招待 `discord.gg/{invite.code}` を作成直後に無効化しました（このサーバーでは招待を作れるのは権限持ちのみです）")
+    try:
+        await inviter.send("このサーバーでは、招待リンクを作成できるのは権限を持つメンバーだけに制限されています。作った招待は自動で無効化されました。")
+    except Exception:
+        pass
 
 
 @bot.listen("on_invite_delete")
@@ -124,14 +163,12 @@ async def _track_join(member: discord.Member):
     if not cfg.get("invite_track_enabled", True):
         return
     ch = _target_channel(guild)
-    if ch is None:
-        return
     before = _cache.get(guild.id)
     after = await _snapshot(guild)
+    code, info = (None, None)
     if after is None:
         invite_text = "取得できませんでした（BOTに「サーバーの管理」権限が必要です）"
     else:
-        code, info = (None, None)
         if before is not None:
             code, info = _find_used(before, after)
         _cache[guild.id] = after
@@ -140,10 +177,46 @@ async def _track_join(member: discord.Member):
             invite_text = f"`discord.gg/{code}`（作成者: {inviter} / この招待の累計使用回数: {info['uses']} 回）"
         else:
             invite_text = "特定できませんでした（バニティURL・ウィジェット・サーバー発見などの可能性）"
-    try:
-        await ch.send(embed=build_join_embed(member, invite_text))
-    except discord.Forbidden:
-        pass
+
+    # ---- 入室時ガード（2重チェック）: 作成時に弾かれなかった権限なし招待からの入室をキックする ----
+    guard_text = None
+    if cfg.get("invite_guard_enabled", False) and code and info and not member.bot:
+        inviter_id = info.get("inviter_id")
+        inviter_member = guild.get_member(inviter_id) if inviter_id else None
+        if inviter_member is not None:
+            ip = inviter_member.guild_permissions
+            joiner_admin = member.guild_permissions.administrator
+            if not (ip.administrator or ip.manage_guild) and not joiner_admin:
+                try:
+                    await member.send("このサーバーでは、権限を持つメンバーの招待リンクからのみ参加できます。権限のないメンバーの招待から入室したため、退出となりました。")
+                except Exception:
+                    pass
+                kicked = False
+                try:
+                    await member.kick(reason="招待ガード（入室時チェック）: 権限のないメンバーの招待からの入室")
+                    kicked = True
+                except (discord.Forbidden, discord.NotFound):
+                    kicked = False
+                inv_obj = await _fetch_invite(guild, code)
+                if inv_obj is not None:
+                    try:
+                        await inv_obj.delete()
+                    except (discord.Forbidden, discord.NotFound):
+                        pass
+                    if guild.id in _cache:
+                        _cache[guild.id].pop(code, None)
+                if kicked:
+                    guard_text = f"権限のないメンバー（<@{inviter_id}>）の招待から入室したため、自動でキックしました。招待 `discord.gg/{code}` も無効化しました。"
+                else:
+                    guard_text = f"権限のないメンバー（<@{inviter_id}>）の招待からの入室を検知しましたが、キックできませんでした（BOTのキック権限・ロール位置を確認してください）。招待は無効化しました。"
+
+    if ch is not None:
+        try:
+            await ch.send(embed=build_join_embed(member, invite_text, guard_text))
+        except discord.Forbidden:
+            pass
+    elif guard_text:
+        await log_event(guild, f"📥 入室: {member.mention}（ID: {member.id}）\n🛡 招待ガード: {guard_text}")
 
 
 @bot.listen("on_member_remove")
@@ -237,6 +310,27 @@ class InviteDeleteView(discord.ui.View):
         self.clear_items()
         self.stop()
         await interaction.response.edit_message(content="キャンセルしました。招待はそのままです。", view=self)
+
+
+@bot.tree.command(name="invite_guard", description="招待ガード（権限なしメンバーの招待を自動で無効化）のON/OFF（管理者用）")
+@app_commands.describe(state="on=有効 / off=無効（選ばなければ今の状態を表示）")
+@app_commands.choices(state=[
+    app_commands.Choice(name="on（有効にする）", value="on"),
+    app_commands.Choice(name="off（無効にする）", value="off"),
+])
+@app_commands.checks.has_permissions(administrator=True)
+async def cmd_invite_guard(interaction: discord.Interaction, state: str = None):
+    cfg = store.cfg(interaction.guild.id)
+    if state is None:
+        now = "有効（on）" if cfg.get("invite_guard_enabled", False) else "無効（off）"
+        await interaction.response.send_message(f"現在の招待ガード: **{now}**\n有効にすると、権限（管理者/サーバーの管理）を持たないメンバーが作った招待は、作られた直後に自動で無効化されます。", ephemeral=True)
+        return
+    cfg["invite_guard_enabled"] = state == "on"
+    store.save_config()
+    if state == "on":
+        await interaction.response.send_message("🛡 招待ガードを **有効** にしました。これから作られる招待のうち、権限なしメンバーのものは自動で無効化されます。\n※ 既に存在する招待は対象外です。過去の招待を消したい場合は /invite_delete を使ってね。", ephemeral=True)
+    else:
+        await interaction.response.send_message("招待ガードを **無効** にしました。誰の招待でも使えます。", ephemeral=True)
 
 
 @bot.tree.command(name="invite_delete", description="有効な招待リンクを選んで無効化する（管理者用）")
