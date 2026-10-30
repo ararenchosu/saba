@@ -144,8 +144,119 @@ def baccarat_payout(bet: int, side: str, winner: str) -> int:
 
 
 # ---------------- ハイアンドロー ----------------
-def hl_payout(bet: int) -> int:
-    return int(bet * 1.9)
+def hl_step_multiplier(current_rank: int, high: bool):
+    """次の1手の倍率。当てられるランク数から算出（同数はノーカウント前提）。不可能なら None"""
+    w = (13 - current_rank) if high else (current_rank - 1)
+    if w <= 0:
+        return None
+    return 12 / w * 0.97
+
+
+class HighLowView(discord.ui.View):
+    """当てるたび倍率が上がり、自分でやめる（キャッシュアウト）か外れるまで続く連続式"""
+
+    def __init__(self, bet: int):
+        super().__init__(timeout=600)
+        self.bet = bet
+        self.deck = _new_shoe()
+        self.current = self.deck.pop()
+        self.streak = 0
+        self.mult = 1.0
+        self.finished = False
+        self.btn_high = discord.ui.Button(style=discord.ButtonStyle.primary, row=0)
+        self.btn_high.callback = lambda i: self._guess(i, True)
+        self.btn_low = discord.ui.Button(style=discord.ButtonStyle.primary, row=0)
+        self.btn_low.callback = lambda i: self._guess(i, False)
+        self.btn_stop = discord.ui.Button(label="💰 やめる（キャッシュアウト）", style=discord.ButtonStyle.success, row=1)
+        self.btn_stop.callback = self._stop
+        self.add_item(self.btn_high)
+        self.add_item(self.btn_low)
+        self.add_item(self.btn_stop)
+        self._sync_buttons()
+
+    def _draw(self):
+        if len(self.deck) < 5:
+            self.deck = _new_shoe()
+        return self.deck.pop()
+
+    def _cashout_amount(self) -> int:
+        return int(self.bet * self.mult)
+
+    def _sync_buttons(self):
+        rank = self.current[0]
+        mh = hl_step_multiplier(rank, True)
+        ml = hl_step_multiplier(rank, False)
+        self.btn_high.label = f"⬆️ ハイ（×{mh:.2f}）" if mh else "⬆️ ハイ（選べません）"
+        self.btn_high.disabled = mh is None or self.finished
+        self.btn_low.label = f"⬇️ ロー（×{ml:.2f}）" if ml else "⬇️ ロー（選べません）"
+        self.btn_low.disabled = ml is None or self.finished
+        self.btn_stop.disabled = self.finished
+        if self.streak > 0:
+            self.btn_stop.label = f"💰 やめる（{fmt(self._cashout_amount())} 確定）"
+
+    def build_embed(self, note: str = None) -> discord.Embed:
+        embed = discord.Embed(title="🔼 ハイアンドロー", color=discord.Color.blurple())
+        embed.description = (
+            f"現在のカード: **{_card_text(self.current)}**\n"
+            f"連続成功: {self.streak} 回 / 現在の倍率: ×{self.mult:.2f} / キャッシュアウト額: **{fmt(self._cashout_amount())}**\n"
+            "当て続けると倍率が上がります。外れたら掛け金は没収。「やめる」で今の額を確定できます。同数はノーカウントで継続。"
+        )
+        embed.add_field(name="掛け金", value=fmt(self.bet), inline=False)
+        if note:
+            embed.add_field(name="経過", value=note, inline=False)
+        return embed
+
+    async def _guess(self, interaction: discord.Interaction, high: bool):
+        if self.finished:
+            await interaction.response.defer()
+            return
+        step = hl_step_multiplier(self.current[0], high)
+        if step is None:
+            await interaction.response.defer()
+            return
+        nxt = self._draw()
+        cur_r, nxt_r = self.current[0], nxt[0]
+        if nxt_r == cur_r:
+            note = f"{_card_text(self.current)} → {_card_text(nxt)} 同数！ノーカウントで継続します"
+            self.current = nxt
+            self._sync_buttons()
+            await interaction.response.edit_message(embed=self.build_embed(note), view=self)
+            return
+        if (nxt_r > cur_r) == high:
+            self.streak += 1
+            self.mult *= step
+            note = f"{_card_text(self.current)} → {_card_text(nxt)} ⭕ 当たり！（{self.streak}連続）"
+            self.current = nxt
+            self._sync_buttons()
+            await interaction.response.edit_message(embed=self.build_embed(note), view=self)
+            return
+        self.finished = True
+        self._sync_buttons()
+        u = _wallet(interaction.guild.id, interaction.user.id)
+        embed = discord.Embed(title="🔼 ハイアンドロー", color=discord.Color.red())
+        embed.description = f"{_card_text(self.current)} → {_card_text(nxt)} ❌ ハズレ…"
+        embed.add_field(name="結果", value=f"{self.streak} 連続で終了。**{fmt(self.bet)}** を失いました", inline=False)
+        embed.add_field(name="残高", value=fmt(u["money"]), inline=False)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def _stop(self, interaction: discord.Interaction):
+        if self.finished:
+            await interaction.response.defer()
+            return
+        self.finished = True
+        self._sync_buttons()
+        amount = self._cashout_amount()
+        u = _wallet(interaction.guild.id, interaction.user.id)
+        u["money"] += amount
+        users.save()
+        embed = discord.Embed(title="🔼 ハイアンドロー", color=discord.Color.green())
+        embed.description = f"現在のカード: **{_card_text(self.current)}**（{self.streak} 連続成功）"
+        if amount > self.bet:
+            embed.add_field(name="結果", value=f"💰 **{fmt(amount)}** をキャッシュアウト（+{fmt(amount - self.bet)}）！", inline=False)
+        else:
+            embed.add_field(name="結果", value=f"掛け金 **{fmt(amount)}** をそのまま回収しました", inline=False)
+        embed.add_field(name="残高", value=fmt(u["money"]), inline=False)
+        await interaction.response.edit_message(embed=embed, view=self)
 
 
 # ---------------- マインズ ----------------
@@ -159,6 +270,52 @@ def mines_multiplier(tiles: int, mines: int, revealed: int) -> float:
 
 
 # ---------------- 掛け金モーダル ----------------
+
+def _play_slot(guild_id: int, user_id: int, bet: int):
+    """掛け金を引いて1回回す。(リール, 払戻, 残高) を返す"""
+    u = _wallet(guild_id, user_id)
+    u["money"] -= bet
+    reels = slot_spin()
+    pay = slot_payout(bet, reels)
+    u["money"] += pay
+    users.save()
+    return reels, pay, u["money"]
+
+
+def _slot_embed(bet: int, reels, pay: int, balance: int) -> discord.Embed:
+    embed = discord.Embed(title="🎰 スロット", color=discord.Color.gold() if pay > bet else discord.Color.greyple())
+    embed.description = f"## {' '.join(reels)}"
+    if pay > bet:
+        embed.add_field(name="結果", value=f"🎉 当たり！ **{fmt(pay)}** 獲得（+{fmt(pay - bet)}）", inline=False)
+    elif pay > 0:
+        embed.add_field(name="結果", value=f"ペアで **{fmt(pay)}** 戻ってきました（-{fmt(bet - pay)}）", inline=False)
+    else:
+        embed.add_field(name="結果", value=f"ハズレ… **{fmt(bet)}** を失いました", inline=False)
+    embed.add_field(name="残高", value=fmt(balance), inline=False)
+    return embed
+
+
+class SlotAgainView(discord.ui.View):
+    """スロット結果から同じ掛け金で連続して回せるビュー"""
+
+    def __init__(self, bet: int):
+        super().__init__(timeout=600)
+        self.bet = bet
+
+    @discord.ui.button(label="🔁 もう一度回す（同じ掛け金）", style=discord.ButtonStyle.primary)
+    async def btn_again(self, interaction: discord.Interaction, button: discord.ui.Button):
+        u = _wallet(interaction.guild.id, interaction.user.id)
+        if self.bet > u["money"]:
+            await interaction.response.send_message(f"残高が足りません（残高: {fmt(u['money'])}）。ログインボーナスで受け取ってね。", ephemeral=True)
+            return
+        reels, pay, balance = _play_slot(interaction.guild.id, interaction.user.id, self.bet)
+        await interaction.response.edit_message(embed=_slot_embed(self.bet, reels, pay, balance), view=self)
+
+    @discord.ui.button(label="✏️ 掛け金を変える", style=discord.ButtonStyle.secondary)
+    async def btn_change(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(BetModal("slot"))
+
+
 class BetModal(discord.ui.Modal, title="掛け金を入力"):
     bet = discord.ui.TextInput(label="掛け金（$）", placeholder="例: 1000", max_length=10)
 
@@ -179,21 +336,8 @@ class BetModal(discord.ui.Modal, title="掛け金を入力"):
             await interaction.response.send_message(f"残高が足りません（残高: {fmt(u['money'])}）。ログインボーナスで受け取ってね。", ephemeral=True)
             return
         if self.game == "slot":
-            u["money"] -= amount
-            reels = slot_spin()
-            pay = slot_payout(amount, reels)
-            u["money"] += pay
-            users.save()
-            embed = discord.Embed(title="🎰 スロット", color=discord.Color.gold() if pay > amount else discord.Color.greyple())
-            embed.description = f"## {' '.join(reels)}"
-            if pay > amount:
-                embed.add_field(name="結果", value=f"🎉 当たり！ **{fmt(pay)}** 獲得（+{fmt(pay - amount)}）", inline=False)
-            elif pay > 0:
-                embed.add_field(name="結果", value=f"ペアで **{fmt(pay)}** 戻ってきました（-{fmt(amount - pay)}）", inline=False)
-            else:
-                embed.add_field(name="結果", value=f"ハズレ… **{fmt(amount)}** を失いました", inline=False)
-            embed.add_field(name="残高", value=fmt(u["money"]), inline=False)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            reels, pay, balance = _play_slot(interaction.guild.id, interaction.user.id, amount)
+            await interaction.response.send_message(embed=_slot_embed(amount, reels, pay, balance), view=SlotAgainView(amount), ephemeral=True)
         elif self.game == "baccarat":
             await interaction.response.send_message(
                 f"掛け金 {fmt(amount)}。どっちに賭ける？",
@@ -277,54 +421,6 @@ class BaccaratSideView(discord.ui.View):
     @discord.ui.button(label="タイ（×8）", style=discord.ButtonStyle.success)
     async def btn_tie(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._play(interaction, "tie", "タイ")
-
-
-# ---------------- ハイアンドロー ----------------
-class HighLowView(discord.ui.View):
-    def __init__(self, bet: int):
-        super().__init__(timeout=180)
-        self.bet = bet
-        deck = _new_shoe()
-        self.current = deck.pop()
-        self.next = deck.pop()
-
-    def build_embed(self) -> discord.Embed:
-        embed = discord.Embed(title="🔼 ハイアンドロー", color=discord.Color.blurple())
-        embed.description = f"現在のカード: **{_card_text(self.current)}**\n次のカードはこれより高い？低い？（勝てば×1.9、同数は返金）"
-        embed.add_field(name="掛け金", value=fmt(self.bet), inline=False)
-        return embed
-
-    async def _guess(self, interaction: discord.Interaction, high: bool):
-        for child in self.children:
-            child.disabled = True
-        cur = self.current[0]
-        nxt = self.next[0]
-        u = _wallet(interaction.guild.id, interaction.user.id)
-        embed = discord.Embed(title="🔼 ハイアンドロー")
-        embed.description = f"{_card_text(self.current)} → {_card_text(self.next)}"
-        if nxt == cur:
-            u["money"] += self.bet
-            embed.color = discord.Color.greyple()
-            embed.add_field(name="結果", value=f"同数で引き分け。掛け金 **{fmt(self.bet)}** が返金されました", inline=False)
-        elif (nxt > cur) == high:
-            pay = hl_payout(self.bet)
-            u["money"] += pay
-            embed.color = discord.Color.green()
-            embed.add_field(name="結果", value=f"🎉 当たり！ **{fmt(pay)}** 獲得（+{fmt(pay - self.bet)}）", inline=False)
-        else:
-            embed.color = discord.Color.red()
-            embed.add_field(name="結果", value=f"ハズレ… **{fmt(self.bet)}** を失いました", inline=False)
-        users.save()
-        embed.add_field(name="残高", value=fmt(u["money"]), inline=False)
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    @discord.ui.button(label="⬆️ ハイ（高い）", style=discord.ButtonStyle.primary)
-    async def btn_high(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._guess(interaction, True)
-
-    @discord.ui.button(label="⬇️ ロー（低い）", style=discord.ButtonStyle.primary)
-    async def btn_low(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._guess(interaction, False)
 
 
 # ---------------- マインズ ----------------
@@ -490,12 +586,15 @@ async def cmd_setup_casino(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🎰 カジノ",
         description=(
-            "ボタンから遊べます。通貨は **$**、掛け金は押した後の入力式です。\n"
-            "💰 ログインボーナスは1日1回 **$5,000**。まずはこれを受け取ってから遊んでね。\n"
-            "🎰 スロット / 🃏 バカラ / 🔼 ハイアンドロー / 💣 マインズ"
+            "ボタンから遊べます。通貨は **$**、掛け金は押した後の入力式（最小 $10）です。\n"
+            "💰 ログインボーナスは1日1回 **$5,000**。まずはこれを受け取ってから遊んでね。"
         ),
         color=discord.Color.gold(),
     )
+    embed.add_field(name="🎰 スロット", value="リール3つを回します。3つ揃い: 🍒×4 / 🍋×6 / 🔔×10 / ⭐×15 / 💎×25 / 7️⃣×50。どれか2つ一致でも×1.2。当たっても外れても、そのまま同じ掛け金で連続で回せます。", inline=False)
+    embed.add_field(name="🃏 バカラ", value="プレイヤー / バンカー / タイ のどれに賭けるか選びます。カードの合計の下1桁が9に近い方の勝ち（3枚目のルールは正式式）。配当: プレイヤー×2.0 / バンカー×1.95 / タイ×8。タイのとき、プレイヤー・バンカーへの賭けは返金されます。", inline=False)
+    embed.add_field(name="🔼 ハイアンドロー", value="次のカードが今のカードより高いか低いかを当てる連続ゲーム。当てるたびに倍率が上がり（倍率はカードによって変動）、好きなところで「やめる」を押すとその額が確定します。外れたら掛け金は没収。同数はノーカウントで継続。", inline=False)
+    embed.add_field(name="💣 マインズ", value="20マスの中に地雷が1〜19個（数は自分で指定）。マスを開けるたびに倍率が上がり、好きなところでキャッシュアウトして確定できます。地雷を踏んだら掛け金は没収です。", inline=False)
     await interaction.channel.send(embed=embed, view=CasinoPanelView())
     await interaction.response.send_message("✅ カジノパネルを設置しました。", ephemeral=True)
 
