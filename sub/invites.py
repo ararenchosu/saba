@@ -42,10 +42,11 @@ def _find_used(before: dict, after: dict):
     return None, None
 
 
-def _log_channel(guild):
+def _target_channel(guild):
+    """入退室Embedの投稿先。/setwelcome で指定されたチャンネルだけ（未指定なら投稿しない）"""
     cfg = store.cfg(guild.id)
-    if cfg.get("log_channel_id"):
-        return guild.get_channel(cfg["log_channel_id"])
+    if cfg.get("welcome_channel_id"):
+        return guild.get_channel(cfg["welcome_channel_id"])
     return None
 
 
@@ -71,6 +72,7 @@ def build_join_embed(member, invite_text: str) -> discord.Embed:
     embed.add_field(name="アカウント種類", value="🤖 Bot" if member.bot else "👤 ユーザー", inline=False)
     embed.add_field(name="使用した招待", value=invite_text, inline=False)
     embed.add_field(name="👥 サーバー総人数", value=f"{member.guild.member_count}人", inline=False)
+    embed.add_field(name="ようこそ！", value=f"{member.guild.name}にいらっしゃい！認証があったら認証から認証してね！", inline=False)
     embed.set_footer(text=_footer(member.guild))
     return embed
 
@@ -120,7 +122,7 @@ async def _track_join(member: discord.Member):
     cfg = store.cfg(guild.id)
     if not cfg.get("invite_track_enabled", True):
         return
-    ch = _log_channel(guild)
+    ch = _target_channel(guild)
     if ch is None:
         return
     before = _cache.get(guild.id)
@@ -149,7 +151,7 @@ async def _track_leave(member: discord.Member):
     cfg = store.cfg(guild.id)
     if not cfg.get("invite_track_enabled", True):
         return
-    ch = _log_channel(guild)
+    ch = _target_channel(guild)
     if ch is None:
         return
     try:
