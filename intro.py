@@ -8,7 +8,7 @@ intro.py — 自己紹介: パネル（ボタン→フォーム入力）→ 送�
 import discord
 from discord import app_commands
 
-from core import bot, store
+from sub.core import bot, store
 
 
 def build_intro_embed(display_name: str, avatar_url, fields: list, values: dict) -> discord.Embed:
