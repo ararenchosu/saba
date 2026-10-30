@@ -24,11 +24,13 @@ from sub import tickets  # noqa: F401  （高機能: チケット）
 from sub import utility  # noqa: F401  （高機能: 投票・抽選・リマインダー・情報）
 from sub import helpcmd  # noqa: F401  （/help コマンド一覧）
 from sub import invites  # noqa: F401  （招待トラッキング）
+from sub import casino  # noqa: F401  （カジノ）
 from sub.gate import RulesView, RolePanelView
 from sub.recruit import RecruitPanelView, RecruitCardView, expire_recruitments
 from sub.intro import IntroPanelView
 from sub.tickets import TicketPanelView, TicketCloseView
 from sub.invites import InvitePanelView
+from sub.casino import CasinoPanelView
 from sub.utility import PollView, GiveawayView, utility_loop
 from sub.userdata import utility as utility_store
 
@@ -139,6 +141,7 @@ async def on_ready():
     bot.add_view(TicketPanelView())
     bot.add_view(TicketCloseView())
     bot.add_view(InvitePanelView())
+    bot.add_view(CasinoPanelView())
     # 進行中の投票・抽選のボタンを復旧
     for mid in utility_store.data.get("polls", {}):
         try:
