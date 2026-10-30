@@ -7,7 +7,7 @@ on_message は listen で受ける（コマンド処理は discord.py の標準�
 import time
 from collections import defaultdict, deque
 
-from core import bot, store, log_event
+from core import bot, store, log_event, is_home
 
 _recent_msgs = defaultdict(deque)  # (guild_id, user_id) -> deque[(content, ts)]
 
@@ -15,6 +15,8 @@ _recent_msgs = defaultdict(deque)  # (guild_id, user_id) -> deque[(content, ts)]
 @bot.listen("on_message")
 async def moderate_message(message):
     if message.author.bot or message.guild is None:
+        return
+    if not is_home(message.guild.id):
         return
     cfg = store.cfg(message.guild.id)
     content = message.content or ""
