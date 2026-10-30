@@ -7,7 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from core import bot, store, get_or_create_role
+from sub.core import bot, store, get_or_create_role
 
 # ---------------- ウェルカム ----------------
 @bot.listen("on_member_join")
