@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
 
-from sub.core import bot, store, is_home
+from sub.core import bot, store, is_home, log_event
 
 JST = timezone(timedelta(hours=9))
 
@@ -162,6 +162,102 @@ async def _track_leave(member: discord.Member):
         await ch.send(embed=build_leave_embed(member))
     except discord.Forbidden:
         pass
+
+
+async def _delete_invites(by_code: dict, codes: list):
+    """招待をまとめて削除する。(削除できた, 既に無効だった, 失敗した) のコードリストを返す"""
+    done, gone, failed = [], [], []
+    for code in codes:
+        inv = by_code.get(code)
+        if inv is None:
+            gone.append(code)
+            continue
+        try:
+            await inv.delete()
+            done.append(code)
+        except discord.NotFound:
+            gone.append(code)
+        except discord.Forbidden:
+            failed.append(code)
+    return done, gone, failed
+
+
+class InviteDeleteView(discord.ui.View):
+    """招待の複数選択 → 確認ボタンで削除、の2段階ビュー"""
+
+    def __init__(self, invites):
+        super().__init__(timeout=300)
+        self.by_code = {i.code: i for i in invites}
+        self.selected = []
+        options = []
+        for i in invites[:25]:
+            inviter = i.inviter.name if i.inviter else "不明"
+            ch = f"#{i.channel.name}" if getattr(i, "channel", None) else "-"
+            options.append(discord.SelectOption(
+                label=f"discord.gg/{i.code}",
+                value=i.code,
+                description=f"作成者: {inviter} / 使用 {i.uses or 0} 回 / {ch}"[:100],
+            ))
+        self.select = discord.ui.Select(
+            placeholder="無効化する招待を選んでね（複数選択OK）",
+            min_values=1, max_values=len(options), options=options,
+        )
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        self.selected = list(self.select.values)
+        lines = ["この招待を無効化します（削除すると、そのリンクからは二度と入れなくなります）："]
+        lines += [f"- `discord.gg/{c}`" for c in self.selected]
+        lines.append("よければ下の「無効化する」ボタンを押してね。")
+        self.clear_items()
+        confirm = discord.ui.Button(label="🗑 無効化する", style=discord.ButtonStyle.danger)
+        confirm.callback = self._on_confirm
+        cancel = discord.ui.Button(label="キャンセル", style=discord.ButtonStyle.secondary)
+        cancel.callback = self._on_cancel
+        self.add_item(confirm)
+        self.add_item(cancel)
+        await interaction.response.edit_message(content="\n".join(lines), view=self)
+
+    async def _on_confirm(self, interaction: discord.Interaction):
+        done, gone, failed = await _delete_invites(self.by_code, self.selected)
+        self.clear_items()
+        parts = []
+        if done:
+            parts.append("無効化した招待: " + "、".join(f"`{c}`" for c in done))
+        if gone:
+            parts.append("既に無効だった招待: " + "、".join(f"`{c}`" for c in gone))
+        if failed:
+            parts.append("❌ 削除できなかった招待: " + "、".join(f"`{c}`" for c in failed) + "（BOTの権限を確認してね）")
+        if done:
+            await log_event(interaction.guild, f"🗑 {interaction.user.mention} が招待を無効化しました: " + "、".join(f"`discord.gg/{c}`" for c in done))
+        self.stop()
+        await interaction.response.edit_message(content="\n".join(parts) if parts else "対象がありませんでした。", view=self)
+
+    async def _on_cancel(self, interaction: discord.Interaction):
+        self.clear_items()
+        self.stop()
+        await interaction.response.edit_message(content="キャンセルしました。招待はそのままです。", view=self)
+
+
+@bot.tree.command(name="invite_delete", description="有効な招待リンクを選んで無効化する（管理者用）")
+@app_commands.checks.has_permissions(administrator=True)
+async def cmd_invite_delete(interaction: discord.Interaction):
+    try:
+        invites = await interaction.guild.invites()
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ 招待一覧を取得できませんでした。BOTに「サーバーの管理」権限が必要です。", ephemeral=True)
+        return
+    if not invites:
+        await interaction.response.send_message("現在有効な招待リンクはないよ。", ephemeral=True)
+        return
+    note = ""
+    if interaction.guild.vanity_url_code:
+        note = f"\n※ バニティURL `discord.gg/{interaction.guild.vanity_url_code}` はここでは消せません。サーバー設定の招待リンクから無効化してね。"
+    if len(invites) > 25:
+        note += "\n※ 招待が25件を超えているため、使用回数の多い順に25件まで表示しています。"
+        invites = sorted(invites, key=lambda x: x.uses or 0, reverse=True)
+    await interaction.response.send_message(f"無効化したい招待をメニューから選んでね。{note}", view=InviteDeleteView(invites), ephemeral=True)
 
 
 @bot.tree.command(name="invites", description="現在有効な招待リンクの一覧を見る（管理者用）")
