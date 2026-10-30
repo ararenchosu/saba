@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
 
-from sub.core import bot, store, log_event
+from sub.core import bot, store, log_event, is_home
 from sub.userdata import modlogs
 
 JST = timezone(timedelta(hours=9))
@@ -35,6 +35,8 @@ def _now_str() -> str:
 @bot.listen("on_message")
 async def auto_moderation(message: discord.Message):
     if message.author.bot or message.guild is None:
+        return
+    if not is_home(message.guild.id):
         return
     if isinstance(message.author, discord.Member) and message.author.guild_permissions.administrator:
         return
