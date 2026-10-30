@@ -12,7 +12,7 @@ from discord.ext import commands, tasks
 
 from discord import app_commands
 
-from sub.core import bot, store
+from core import bot, store
 
 # ---------------- 募集システム ----------------
 def _new_rid() -> str:
