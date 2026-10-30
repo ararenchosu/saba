@@ -13,7 +13,7 @@ import time
 import discord
 from discord import app_commands
 
-from sub.core import bot, store, get_or_create_role
+from sub.core import bot, store, get_or_create_role, is_home
 from sub.userdata import users
 
 XP_COOLDOWN = 60
@@ -47,6 +47,8 @@ def bar(cur: int, need: int, width: int = 12) -> str:
 @bot.listen("on_message")
 async def xp_on_message(message: discord.Message):
     if message.author.bot or message.guild is None:
+        return
+    if not is_home(message.guild.id):
         return
     cfg = store.cfg(message.guild.id)
     if not cfg.get("xp_enabled", True):
