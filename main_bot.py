@@ -7,10 +7,12 @@ main_bot.py — メインBOT（身内用）の本体
 機能モジュールはルートの core.py / gate.py / recruit.py / settings.py / moderation.py / intro.py。
 """
 
+import time
+
 import discord
 from discord import app_commands
 
-from core import bot, store, TOKEN
+from core import bot, store, TOKEN, home_guild_id
 import gate  # noqa: F401  （コマンド・イベント登録のため import）
 import recruit  # noqa: F401
 import settings  # noqa: F401
@@ -39,6 +41,41 @@ async def cmd_help(interaction: discord.Interaction):
         inline=False,
     )
     embed.add_field(name="使い方", value="募集は募集パネルのボタンから。ロールはロール選択パネルから付けられます。", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+STARTED_AT = time.time()
+
+
+def _fmt_uptime(seconds: float) -> str:
+    seconds = int(seconds)
+    d, rem = divmod(seconds, 86400)
+    h, rem = divmod(rem, 3600)
+    m = rem // 60
+    if d:
+        return f"{d}日{h}時間{m}分"
+    if h:
+        return f"{h}時間{m}分"
+    return f"{m}分"
+
+
+@bot.tree.command(name="botinfo", description="BOTの稼働状況（所属サーバー数など）を表示する（管理者用）")
+@app_commands.checks.has_permissions(administrator=True)
+async def cmd_botinfo(interaction: discord.Interaction):
+    home = home_guild_id()
+    lines = []
+    total_members = 0
+    for g in bot.guilds:
+        total_members += g.member_count or 0
+        mark = ""
+        if home is not None:
+            mark = "（担当）" if g.id == home else "（担当外）"
+        lines.append(f"・{g.name} … {g.member_count}人{mark}")
+    embed = discord.Embed(title="🤖 BOT稼働状況", color=discord.Color.blurple())
+    embed.add_field(name="所属サーバー数", value=f"{len(bot.guilds)} 件", inline=True)
+    embed.add_field(name="合計メンバー数", value=f"{total_members} 人", inline=True)
+    embed.add_field(name="稼働時間", value=_fmt_uptime(time.time() - STARTED_AT), inline=True)
+    embed.add_field(name="所属サーバー", value="\n".join(lines)[:1024] if lines else "なし", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -93,6 +130,10 @@ async def on_ready():
                 print(f"募集カード復旧失敗 rid={rid}: {e}")
     if not expire_recruitments.is_running():
         expire_recruitments.start()
+    try:
+        await bot.change_presence(activity=discord.Game(name=f"{len(bot.guilds)} 件のサーバーで稼働中"))
+    except Exception:
+        pass
     print("------ メインBOT（身内用） 起動完了 ------")
 
 
