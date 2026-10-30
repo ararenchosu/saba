@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
 
-from sub.core import bot, store
+from sub.core import bot, store, is_home
 
 JST = timezone(timedelta(hours=9))
 
@@ -119,6 +119,8 @@ async def _on_invite_delete(invite: discord.Invite):
 @bot.listen("on_member_join")
 async def _track_join(member: discord.Member):
     guild = member.guild
+    if not is_home(guild.id):
+        return
     cfg = store.cfg(guild.id)
     if not cfg.get("invite_track_enabled", True):
         return
@@ -148,6 +150,8 @@ async def _track_join(member: discord.Member):
 @bot.listen("on_member_remove")
 async def _track_leave(member: discord.Member):
     guild = member.guild
+    if not is_home(guild.id):
+        return
     cfg = store.cfg(guild.id)
     if not cfg.get("invite_track_enabled", True):
         return
