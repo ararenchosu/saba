@@ -21,6 +21,7 @@ from sub import economy  # noqa: F401  （高機能: コイン経済）
 from sub import tickets  # noqa: F401  （高機能: チケット）
 from sub import utility  # noqa: F401  （高機能: 投票・抽選・リマインダー・情報）
 from sub import helpcmd  # noqa: F401  （/help コマンド一覧）
+from sub import invites  # noqa: F401  （招待トラッキング）
 from sub.gate import RulesView, RolePanelView
 from sub.recruit import RecruitPanelView, RecruitCardView, expire_recruitments
 from sub.intro import IntroPanelView
