@@ -8,13 +8,13 @@ import time
 import random
 from datetime import datetime
 
-from cogs.ywp_auto import Client, login_email, RC
-from cogs.ywp_panel import run_farm
+from ywp.auto import Client, login_email, RC
+from ywp.panel import run_farm
+from ywp.core import DATA_DIR
 
 # ============================================================
 # データファイル
 # ============================================================
-DATA_DIR = "data"
 SESSION_FILE = f"{DATA_DIR}/sessions.json"
 LOOP_FILE = f"{DATA_DIR}/loops.json"
 
@@ -168,9 +168,6 @@ class LoginModal(ui.Modal, title="ぷにぷに ログイン"):
 
 
 # ============================================================
-# 周回タスク
-# ============================================================
-# ============================================================
 # Cog
 # ============================================================
 class YWPCommands(commands.Cog):
@@ -225,7 +222,6 @@ class YWPCommands(commands.Cog):
         )
         await safe_reply(interaction, embed=embed, ephemeral=True)
 
-        # 指定された待機秒をそのまま使う（未指定ならパネル同様のランダム待機）
         asyncio.create_task(run_farm(
             self.bot,
             interaction,
