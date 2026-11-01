@@ -553,8 +553,29 @@ class Client:
     def items(self):
         return {int(r[0]): int(r[1]) for r in rows(self.save.get('ywp_user_item')) if len(r) >= 2}
 
-    def stages(self):
+        def stages(self):
         return {int(r[0]): r for r in rows(self.save.get('ywp_user_stage'))}
+
+    def get_all_stage_ids(self):
+        """セーブデータ（ywp_user_stage）から解放済み・クリア済みの全ステージIDを取得"""
+        stage_raw = self.save.get('ywp_user_stage')
+        if not stage_raw:
+            return []
+        
+        stage_ids = set()
+        # '*' 区切りの文字列をパース
+        for row in str(stage_raw).split('*'):
+            if not row:
+                continue
+            cols = row.split('|')
+            try:
+                sid = int(cols[0])
+                if 1 <= sid <= 99999999:
+                    stage_ids.add(sid)
+            except (ValueError, IndexError):
+                pass
+                
+        return sorted(list(stage_ids))
 
 
 # ============================================================================
