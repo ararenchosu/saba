@@ -21,7 +21,6 @@ JST = timezone(timedelta(hours=9))
 # ============================================================
 # データ
 # ============================================================
-DATA_DIR = "data"
 SESSION_FILE = f"{DATA_DIR}/sessions.json"
 LOOP_FILE = f"{DATA_DIR}/loops.json"
 PANEL_FILE = f"{DATA_DIR}/panel.json"
@@ -35,6 +34,7 @@ DEBUG_GAMEEND_FILE = f"{DATA_DIR}/debug_gameend.json"
 # ============================================================
 # 設定
 # ============================================================
+GAIN_DEBUG_DUMP = False # ← 追加（元コードのバグ修正）
 MAX_CONCURRENT_LOOPS = 10
 MAX_SLOTS = 10
 
