@@ -524,17 +524,27 @@ class Client:
             'ywp_mst_game_const': GAME_CONST,
         }
 
-    def battle(self, stageId, battleType=None, wait=None):
+        def battle(self, stageId, battleType=None, wait=None):
         if battleType is None:
             battleType = 6 if str(stageId).startswith(('28805', '28904', '29008', '29304')) else 1
-        rc, js = self.call('gameStart.nhn', {'stageId': stageId, 'battleType': battleType,
-                                             'battleCode': '', 'retryFlg': 0})
+        
+        rc, js = self.call('gameStart.nhn', {
+            'stageId': stageId, 
+            'battleType': battleType,
+            'battleCode': '', 
+            'retryFlg': 0
+        })
+        
         if js.get('resultCode') != 0:
             return js.get('resultCode'), js
 
-        # ★ プレイ時間をランダム化（8.0〜10.0、0.1秒刻み）
+        # ★ プレイ時間をランダム化（15.0〜30.0、10%で45.0）
         if wait is None:
-            wait = round(random.uniform(8.0, 10.0), 1)
+            if random.random() < 0.10:
+                wait = 45.0
+            else:
+                wait = round(random.uniform(15.0, 30.0), 1)
+                
         print(f">>> [battle] プレイ時間 {wait:.1f}秒")
         time.sleep(wait)
 
