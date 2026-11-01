@@ -11,6 +11,7 @@ import time
 
 import discord
 from discord import app_commands
+from discord.ext import tasks
 
 from sub.core import bot, store, TOKEN, home_guild_id
 from sub import gate  # noqa: F401  （コマンド・イベント登録のため import）
@@ -123,6 +124,49 @@ async def on_tree_error(interaction: discord.Interaction, error: app_commands.Ap
 
 
 
+# ---------------- ステータスのローテーション ----------------
+# 15秒ごとに「稼働中サーバー数 → 各コマンドの説明」を順番に表示する。
+# 管理者向けコマンドは末尾に（管理者用）を付ける（オーナー専用コマンドはその旨を付ける）。
+
+def _status_entries():
+    entries = [f"{len(bot.guilds)} 件のサーバーで稼働中 | /help でコマンド一覧"]
+    for cmd in bot.tree.get_commands():
+        desc = cmd.description or ""
+        label = ""
+        if desc.endswith("（サーバーオーナー専用）"):
+            label = "（サーバーオーナー専用）"
+            desc = desc[: -len("（サーバーオーナー専用）")]
+        elif desc.endswith("（管理者用）"):
+            label = "（管理者用）"
+            desc = desc[: -len("（管理者用）")]
+        elif desc.endswith("（管理系）"):
+            label = "（管理者用）"
+            desc = desc[: -len("（管理系）")]
+        elif desc.endswith("・管理系）"):
+            # 例:「（ユーザーID指定・管理系）」→「（ユーザーID指定）」＋（管理者用）
+            label = "（管理者用）"
+            desc = desc[: -len("・管理系）")] + "）"
+        entries.append(f"/{cmd.name}：{desc}{label}"[:128])
+    return entries
+
+
+_status_index = 0
+
+
+@tasks.loop(seconds=15)
+async def rotate_status():
+    global _status_index
+    entries = _status_entries()
+    if not entries:
+        return
+    text = entries[_status_index % len(entries)]
+    _status_index += 1
+    try:
+        await bot.change_presence(activity=discord.Game(name=text))
+    except Exception:
+        pass
+
+
 # ---------------- 起動・復旧 ----------------
 @bot.event
 async def on_ready():
@@ -173,9 +217,11 @@ async def on_ready():
     if not expire_recruitments.is_running():
         expire_recruitments.start()
     try:
-        await bot.change_presence(activity=discord.Game(name=f"{len(bot.guilds)} 件のサーバーで稼働中"))
+        await bot.change_presence(activity=discord.Game(name=f"{len(bot.guilds)} 件のサーバーで稼働中 | /help でコマンド一覧"))
     except Exception:
         pass
+    if not rotate_status.is_running():
+        rotate_status.start()
     print("------ サブBOT（本格用） 起動完了 ------")
 
 
