@@ -206,7 +206,7 @@ class YWPCommands(commands.Cog):
         if not sdata:
             return await safe_reply(
                 interaction,
-                content="❌ セッションがありません。先に `/ywp_login` を実行してください。",
+                content="❌ セッションがありません。先に `/ログイン` を実行してください。",
                 ephemeral=True
             )
 
@@ -259,6 +259,68 @@ class YWPCommands(commands.Cog):
         embed.add_field(name="🆔 ユーザーID", value=str(sdata.get("userId")), inline=True)
         embed.add_field(name="🔑 UDkey", value=f"`{str(sdata.get('udkey'))[:20]}...`", inline=False)
         embed.add_field(name="📅 保存日時", value=sdata.get("saved_at", "不明"), inline=False)
+        await safe_reply(interaction, embed=embed, ephemeral=True)
+
+    @app_commands.command(name="全マップ取得", description="自分が解放・クリア済みの全ステージIDを取得して表示します")
+    async def ywp_all_maps(self, interaction: discord.Interaction):
+        if not await safe_defer(interaction):
+            return
+
+        sessions = load_sessions()
+        sdata = sessions.get(str(interaction.user.id))
+        if not sdata:
+            return await safe_reply(
+                interaction,
+                content="❌ セッションがありません。先に `/ログイン` を実行してください。",
+                ephemeral=True
+            )
+
+        client = Client(sdata["udkey"])
+        client.gdkey = sdata["gdkey"]
+        client.userId = sdata["userId"]
+        client.token = sdata["token"]
+        client.mst = sdata.get("mst", 16897)
+
+        try:
+            await asyncio.to_thread(client.login, sdata["userId"])
+        except Exception as e:
+            return await safe_reply(
+                interaction,
+                content=f"❌ ログイン失敗: `{str(e)[:200]}`",
+                ephemeral=True
+            )
+
+        try:
+            all_stages = await asyncio.to_thread(client.get_all_stage_ids)
+        except Exception as e:
+            return await safe_reply(
+                interaction,
+                content=f"❌ 取得失敗: `{str(e)[:200]}`",
+                ephemeral=True
+            )
+
+        if not all_stages:
+            return await safe_reply(
+                interaction,
+                content="❌ ステージデータが見つかりませんでした。",
+                ephemeral=True
+            )
+
+        # 結果をテキスト化（10個ずつ改行）
+        text_lines = []
+        for i in range(0, len(all_stages), 10):
+            chunk = all_stages[i:i+10]
+            text_lines.append(" ".join(f"`{sid}`" for sid in chunk))
+        
+        text_body = "\n".join(text_lines)
+
+        embed = discord.Embed(
+            title="🗺 解放済みステージID一覧",
+            description=f"取得件数: **{len(all_stages)}件**\n\n{text_body[:3900]}",
+            color=0x5865F2
+        )
+        embed.set_footer(text="セーブデータ(ywp_user_stage)から抽出したIDです")
+        
         await safe_reply(interaction, embed=embed, ephemeral=True)
 
     @app_commands.command(name="停止", description="実行中の周回を停止")
