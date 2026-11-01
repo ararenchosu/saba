@@ -10,7 +10,8 @@ import unicodedata
 import random
 from datetime import datetime, timezone, timedelta, time as dtime
 
-from cogs.ywp_auto import Client, login_email, RC, YPOINT_ITEM_ID, parse_item_rows, parse_user_data
+from ywp.auto import Client, login_email, RC, YPOINT_ITEM_ID, parse_item_rows, parse_user_data
+from ywp.core import DATA_DIR
 
 # ============================================================
 # JST
