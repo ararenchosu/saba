@@ -403,9 +403,12 @@ class Client:
         dmg = total_enemy_hp + overkill
         score = dmg   # スコア = ダメージ
 
-        # ★ クリアタイム
+        # ★ クリアタイム（15.0〜30.0、10%で45.0）
         if clear_time_sec is None:
-            clear_time_sec = round(random.uniform(8.0, 10.0), 1)
+            if random.random() < 0.10:
+                clear_time_sec = 45.0
+            else:
+                clear_time_sec = round(random.uniform(15.0, 30.0), 1)
         clear_time_int = int(round(clear_time_sec))
 
         # ★ 消したぷに数
@@ -439,9 +442,9 @@ class Client:
             link_size_max = random.randint(3, 5)
 
         # 残HP（クリアタイムと連動）
-        if clear_time_int <= 8:
+        if clear_time_int <= 15:
             result_hp = random.randint(600, 700)
-        elif clear_time_int == 9:
+        elif clear_time_int <= 30:
             result_hp = random.randint(650, 750)
         else:
             result_hp = random.randint(700, 800)
@@ -524,7 +527,7 @@ class Client:
             'ywp_mst_game_const': GAME_CONST,
         }
 
-        def battle(self, stageId, battleType=None, wait=None):
+    def battle(self, stageId, battleType=None, wait=None):
         if battleType is None:
             battleType = 6 if str(stageId).startswith(('28805', '28904', '29008', '29304')) else 1
         
@@ -563,7 +566,7 @@ class Client:
     def items(self):
         return {int(r[0]): int(r[1]) for r in rows(self.save.get('ywp_user_item')) if len(r) >= 2}
 
-        def stages(self):
+    def stages(self):
         return {int(r[0]): r for r in rows(self.save.get('ywp_user_stage'))}
 
     def get_all_stage_ids(self):
