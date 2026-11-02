@@ -3211,9 +3211,9 @@ class ProgressActionSelect(ui.Select):
                 return await safe_reply(interaction, content="❌ ステージ情報がありません。", ephemeral=True)
 
             # テキストファイルの作成
-            lines = [f"=== {acc.get('player_name', '不明')} のクリア済みステージ一覧 ==="]
+                        lines = [f"=== {acc.get('player_name', '不明')} のクリア済みステージ一覧 ==="]
             for s in stages:
-                lines.append(f"{s['id']}\t{s['name']}")
+                lines.append(f"{s['id']}")
             
             file_content = "\n".join(lines)
 
