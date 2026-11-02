@@ -1,4 +1,3 @@
-import io
 import discord
 from discord import app_commands, ui
 from discord.ext import commands, tasks
@@ -11,8 +10,7 @@ import unicodedata
 import random
 from datetime import datetime, timezone, timedelta, time as dtime
 
-from ywp.auto import Client, login_email, RC, YPOINT_ITEM_ID, parse_item_rows, parse_user_data
-from ywp.core import DATA_DIR
+from cogs.ywp_auto import Client, login_email, RC, YPOINT_ITEM_ID, parse_item_rows, parse_user_data
 
 # ============================================================
 # JST
@@ -22,6 +20,7 @@ JST = timezone(timedelta(hours=9))
 # ============================================================
 # データ
 # ============================================================
+DATA_DIR = "data"
 SESSION_FILE = f"{DATA_DIR}/sessions.json"
 LOOP_FILE = f"{DATA_DIR}/loops.json"
 PANEL_FILE = f"{DATA_DIR}/panel.json"
@@ -35,7 +34,6 @@ DEBUG_GAMEEND_FILE = f"{DATA_DIR}/debug_gameend.json"
 # ============================================================
 # 設定
 # ============================================================
-GAIN_DEBUG_DUMP = False # ← 追加（元コードのバグ修正）
 MAX_CONCURRENT_LOOPS = 10
 MAX_SLOTS = 10
 
@@ -57,11 +55,10 @@ DAILY_REPORT_ENABLED = True
 DAILY_REPORT_HOUR = 23
 DAILY_REPORT_MINUTE = 55
 
-# ★ 周回間の待機時間を5〜8秒に変更
-REQUEST_DELAY_MIN = 5.0
-REQUEST_DELAY_MAX = 8.0
-COOLDOWN_MIN = 5.0
-COOLDOWN_MAX = 8.0
+REQUEST_DELAY_MIN = 2.5
+REQUEST_DELAY_MAX = 3.0
+COOLDOWN_MIN = 2.5
+COOLDOWN_MAX = 3.0
 
 ODD_HOUR_REST_ENABLED = True
 ODD_HOUR_REST_MIN = 29
@@ -3162,8 +3159,6 @@ class ProgressActionSelect(ui.Select):
         options = [
             discord.SelectOption(label="ステージ一覧", value="stages", emoji="🎯",
                                  description="クリア済みステージIDを表示"),
-            discord.SelectOption(label="ステージ一覧をDMに送る", value="dm_stages", emoji="📩",
-                                 description="全クリア済みステージをtxtファイルでDMに送信"),
             discord.SelectOption(label="ステージ進行", value="progress", emoji="🎯",
                                  description="開始〜終了IDまで順番に周回"),
             discord.SelectOption(label="イベント自動進行", value="event", emoji="🎪",
@@ -3188,52 +3183,6 @@ class ProgressActionSelect(ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         v = self.values[0]
-
-        # ========================================================
-        # 📩 ステージ一覧をDMに送る
-        # ========================================================
-        if v == "dm_stages":
-            if not await safe_defer(interaction):
-                return
-            acc = get_active_account(interaction.user.id)
-            if not acc:
-                return await safe_reply(interaction, content="❌ ログインしていません。", ephemeral=True)
-
-            client = build_client_from_account(acc)
-            try:
-                await asyncio.to_thread(client.login, acc["userId"])
-                update_account_tokens(interaction.user.id, client)
-            except Exception as e:
-                return await safe_reply(interaction, content=f"❌ ログイン失敗: `{str(e)[:200]}`", ephemeral=True)
-
-            stages = await asyncio.to_thread(client.get_all_stages_detail)
-            if not stages:
-                return await safe_reply(interaction, content="❌ ステージ情報がありません。", ephemeral=True)
-
-            # テキストファイルの作成
-            lines = [f"=== {acc.get('player_name', '不明')} のクリア済みステージ一覧 ==="]
-            for s in stages:
-                lines.append(f"{s['id']}")
-            
-            file_content = "\n".join(lines)
-            
-            file_content = "\n".join(lines)
-
-            # ファイルとしてDMに送信
-            try:
-                dm_channel = await interaction.user.create_dm()
-                file = discord.File(fp=io.BytesIO(file_content.encode("utf-8")), filename="stages_list.txt")
-                await dm_channel.send(content="📄 クリア済みステージ一覧を送ります。", file=file)
-                await safe_reply(interaction, content="✅ DMにtxtファイルを送信しました！", ephemeral=True)
-            except discord.Forbidden:
-                await safe_reply(interaction, content="❌ DMが送れません。プライバシー設定を確認してください。", ephemeral=True)
-            except Exception as e:
-                await safe_reply(interaction, content=f"❌ 送信失敗: `{str(e)[:100]}`", ephemeral=True)
-            return
-
-        # ========================================================
-        # 🎯 ステージ一覧（画面表示）
-        # ========================================================
         if v == "stages":
             if not await safe_defer(interaction):
                 return
@@ -3282,10 +3231,6 @@ class ProgressActionSelect(ui.Select):
                 except Exception:
                     break
             return
-
-        # ========================================================
-        # その他のメニュー処理
-        # ========================================================
         if v == "progress":
             try:
                 await interaction.response.send_modal(ProgressModal())
@@ -3410,6 +3355,7 @@ class ProgressActionSelect(ui.Select):
                 )
             await safe_reply(interaction, embed=embed, ephemeral=True)
             return
+
 
 # ============================================================
 # パネルView
