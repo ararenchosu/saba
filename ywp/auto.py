@@ -569,34 +569,93 @@ class Client:
     def stages(self):
         return {int(r[0]): r for r in rows(self.save.get('ywp_user_stage'))}
 
+    def get_stage_master(self):
+        """マスターデータから全ステージのIDと名前のマッピングを取得"""
+        stage_map = {}
+        for key in ["stage", "ywp_mst_stage", "mst_stage"]:
+            try:
+                rc, j = self.call('getMaster.nhn', {'key': key})
+                if j.get('resultCode') != 0:
+                    continue
+                
+                data = j.get(key) or j.get('master') or j.get('data')
+                if not data:
+                    for k, v in j.items():
+                        if isinstance(v, str) and '*' in v and '|' in v:
+                            data = v
+                            break
+                        if isinstance(v, list) and len(v) > 0 and isinstance(v[0], dict):
+                            data = v
+                            break
+                
+                if not data:
+                    continue
+
+                if isinstance(data, str):
+                    for row in data.split('*'):
+                        if not row:
+                            continue
+                        cols = row.split('|')
+                        try:
+                            sid = int(cols[0])
+                            name = "不明"
+                            for c in cols[1:]:
+                                if c and not c.isdigit() and c not in ("true", "false"):
+                                    name = c
+                                    break
+                            stage_map[sid] = name
+                        except (ValueError, IndexError):
+                            pass
+                elif isinstance(data, list):
+                    for row in data:
+                        if isinstance(row, dict):
+                            sid = row.get('stageId') or row.get('id')
+                            name = row.get('stageName') or row.get('name') or row.get('title') or "不明"
+                            if sid:
+                                try:
+                                    stage_map[int(sid)] = name
+                                except ValueError:
+                                    pass
+                
+                if stage_map:
+                    print(f">>> ステージマスタ取得成功: {len(stage_map)}件 (key={key})")
+                    return stage_map
+            except Exception as e:
+                print(f">>> マスタ取得エラー (key={key}): {e}")
+                continue
+        
+        print(">>> ステージマスタの取得に失敗しました")
+        return {}
+
     def get_all_stages_detail(self):
-        """セーブデータから解放済みの全ステージIDと名前を取得"""
+        """セーブデータから解放済みの全ステージIDと名前を取得（名前はマスタから補完）"""
         stage_raw = self.save.get('ywp_user_stage')
         if not stage_raw:
             return []
         
-        stage_list = []
+        # 1. セーブデータから解放済みIDを取得
+        unlocked_ids = set()
         for row in str(stage_raw).split('*'):
             if not row:
                 continue
             cols = row.split('|')
             try:
                 sid = int(cols[0])
-                if not (1 <= sid <= 99999999):
-                    continue
-                
-                # ステージ名の抽出
-                name = "不明"
-                for c in cols[1:]:
-                    if c and not c.isdigit() and c not in ("true", "false"):
-                        name = c
-                        break
-                
-                stage_list.append({"id": sid, "name": name})
+                if 1 <= sid <= 99999999:
+                    unlocked_ids.add(sid)
             except (ValueError, IndexError):
                 pass
+        
+        # 2. マスタデータから名前を取得
+        master_map = self.get_stage_master()
+        
+        # 3. 結果をまとめる
+        stage_list = []
+        for sid in sorted(unlocked_ids):
+            name = master_map.get(sid, "不明")
+            stage_list.append({"id": sid, "name": name})
                 
-        return sorted(stage_list, key=lambda x: x["id"])
+        return stage_list
 
 
 # ============================================================================
@@ -700,13 +759,3 @@ class YWPAuto(commands.Cog):
         return login_email_with_udkey(email, pw, userId, udkey)
 
     @staticmethod
-    def Client(udkey):
-        return Client(udkey)
-
-    @staticmethod
-    def RC():
-        return RC
-
-
-async def setup(bot):
-    await bot.add_cog(YWPAuto(bot))
