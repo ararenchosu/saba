@@ -6931,18 +6931,5 @@ async def start():
         print(f'[log] {path} に記録します（止めるには YWP_LOG=0）')
     token = resolve_token()
     if not token:
-        raise SystemExit(
-            'YWP_DISCORD_TOKEN が設定されていません。\n'
-            '  環境変数 YWP_DISCORD_TOKEN に設定するか、\n'
-            f'  {CONFIG_FILE} に {{"token": "<Botトークン>"}} を置いてください。')
+        raise SystemExit(...)
     await bot.start(token)
-
-
-def main():
-    """単体起動用（従来通り）"""
-    import asyncio
-    asyncio.run(start())
-
-
-if __name__ == '__main__':
-    main()
