@@ -759,3 +759,13 @@ class YWPAuto(commands.Cog):
         return login_email_with_udkey(email, pw, userId, udkey)
 
     @staticmethod
+    def Client(udkey):
+        return Client(udkey)
+
+    @staticmethod
+    def RC():
+        return RC
+
+
+async def setup(bot):
+    await bot.add_cog(YWPAuto(bot))
