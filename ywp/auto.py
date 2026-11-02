@@ -25,7 +25,7 @@ L5 = 'https://api.level5-id.com'
 
 MODEL = 'GA00747-UK'
 OSVER = '9'
-APPVER = '4.177.0'
+APPVER = '4.175.0'
 BATTERY = {'level': 100, 'state': 3, 'technology': 'Li-poly', 'temperature': 261, 'voltage': 4300}
 
 UA = 'Dalvik/2.1.0 (Linux; U; Android %s; %s Build/PI) com.Level5.YWP/%s' % (OSVER, MODEL, APPVER)
@@ -403,12 +403,9 @@ class Client:
         dmg = total_enemy_hp + overkill
         score = dmg   # スコア = ダメージ
 
-        # ★ クリアタイム（15.0〜30.0、10%で45.0）
+        # ★ クリアタイム
         if clear_time_sec is None:
-            if random.random() < 0.10:
-                clear_time_sec = 45.0
-            else:
-                clear_time_sec = round(random.uniform(15.0, 30.0), 1)
+            clear_time_sec = round(random.uniform(8.0, 10.0), 1)
         clear_time_int = int(round(clear_time_sec))
 
         # ★ 消したぷに数
@@ -442,9 +439,9 @@ class Client:
             link_size_max = random.randint(3, 5)
 
         # 残HP（クリアタイムと連動）
-        if clear_time_int <= 15:
+        if clear_time_int <= 8:
             result_hp = random.randint(600, 700)
-        elif clear_time_int <= 30:
+        elif clear_time_int == 9:
             result_hp = random.randint(650, 750)
         else:
             result_hp = random.randint(700, 800)
@@ -530,24 +527,14 @@ class Client:
     def battle(self, stageId, battleType=None, wait=None):
         if battleType is None:
             battleType = 6 if str(stageId).startswith(('28805', '28904', '29008', '29304')) else 1
-        
-        rc, js = self.call('gameStart.nhn', {
-            'stageId': stageId, 
-            'battleType': battleType,
-            'battleCode': '', 
-            'retryFlg': 0
-        })
-        
+        rc, js = self.call('gameStart.nhn', {'stageId': stageId, 'battleType': battleType,
+                                             'battleCode': '', 'retryFlg': 0})
         if js.get('resultCode') != 0:
             return js.get('resultCode'), js
 
-        # ★ プレイ時間をランダム化（15.0〜30.0、10%で45.0）
+        # ★ プレイ時間をランダム化（8.0〜10.0、0.1秒刻み）
         if wait is None:
-            if random.random() < 0.10:
-                wait = 45.0
-            else:
-                wait = round(random.uniform(15.0, 30.0), 1)
-                
+            wait = round(random.uniform(8.0, 10.0), 1)
         print(f">>> [battle] プレイ時間 {wait:.1f}秒")
         time.sleep(wait)
 
@@ -568,84 +555,6 @@ class Client:
 
     def stages(self):
         return {int(r[0]): r for r in rows(self.save.get('ywp_user_stage'))}
-
-    def get_stage_master(self):
-        """マスターデータから全ステージのIDと名前のマッピングを取得"""
-        stage_map = {}
-        for key in ["stage", "ywp_mst_stage", "mst_stage"]:
-            try:
-                rc, j = self.call('getMaster.nhn', {'key': key})
-                if j.get('resultCode') != 0:
-                    continue
-                
-                data = j.get(key) or j.get('master') or j.get('data')
-                if not data:
-                    for k, v in j.items():
-                        if isinstance(v, str) and '*' in v and '|' in v:
-                            data = v
-                            break
-                        if isinstance(v, list) and len(v) > 0 and isinstance(v[0], dict):
-                            data = v
-                            break
-                
-                if not data:
-                    continue
-
-                if isinstance(data, str):
-                    for row in data.split('*'):
-                        if not row:
-                            continue
-                        cols = row.split('|')
-                        try:
-                            sid = int(cols[0])
-                            name = "不明"
-                            for c in cols[1:]:
-                                if c and not c.isdigit() and c not in ("true", "false"):
-                                    name = c
-                                    break
-                            stage_map[sid] = name
-                        except (ValueError, IndexError):
-                            pass
-                elif isinstance(data, list):
-                    for row in data:
-                        if isinstance(row, dict):
-                            sid = row.get('stageId') or row.get('id')
-                            name = row.get('stageName') or row.get('name') or row.get('title') or "不明"
-                            if sid:
-                                try:
-                                    stage_map[int(sid)] = name
-                                except ValueError:
-                                    pass
-                
-                if stage_map:
-                    print(f">>> ステージマスタ取得成功: {len(stage_map)}件 (key={key})")
-                    return stage_map
-            except Exception as e:
-                print(f">>> マスタ取得エラー (key={key}): {e}")
-                continue
-        
-        print(">>> ステージマスタの取得に失敗しました")
-        return {}
-
-    def get_all_stages_detail(self):
-        """セーブデータから解放済みの全ステージIDを取得（名前なし）"""
-        stage_raw = self.save.get('ywp_user_stage')
-        if not stage_raw:
-            return []
-        
-        stage_list = []
-        for row in str(stage_raw).split('*'):
-            if not row:
-                continue
-            cols = row.split('|')
-            try:
-                sid = int(cols[0])
-                if 1 <= sid <= 99999999:
-                    stage_list.append({"id": sid})
-            except (ValueError, IndexError):
-                pass
-                
-        return sorted(stage_list, key=lambda x: x["id"])
 
 
 # ============================================================================
