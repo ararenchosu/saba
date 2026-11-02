@@ -1,28 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-main.py — ランチャー: メインBOT → YWP BOT → サブBOT の順に読み込んで起動
-
-  読み込み順:
-    1) メインBOT（身内用）… main_bot.py
-    2) YWP BOT（自動周回）… YWP/bot.py
-    3) サブBOT（本格用）  … sub/bot.py
-
-  各BOTは個別に起動し、1つが失敗しても他は継続します。
-
-トークン（.env または環境変数）:
-  メインBOT … DISCORD_TOKEN
-  YWP BOT   … YWP_DISCORD_TOKEN
-  サブBOT   … SUB_DISCORD_TOKEN
+ランチャー：メイン + サブ を起動
+YWPは別プロセスで起動するためここからは呼ばない
 """
-
 import asyncio
 import sys
 from pathlib import Path
 
-# YWPフォルダを検索パスに追加 → これが決め手！
 BASE_DIR = Path(__file__).resolve().parent
-YWP_DIR = BASE_DIR / "YWP"
-sys.path.insert(0, str(YWP_DIR))
 
 
 async def _run_all():
@@ -36,17 +21,7 @@ async def _run_all():
     except Exception as e:
         print(f"⚠️ メインBOTの読み込みに失敗: {e}")
 
-    # 2) YWP BOT
-    try:
-        from YWP.bot import start as start_ywp
-        tasks.append(asyncio.create_task(start_ywp()))
-        print("✅ YWP BOTを読み込みました。")
-    except Exception as e:
-        print(f"⚠️ YWP BOTの読み込みに失敗: {e}")
-        import traceback
-        traceback.print_exc()
-
-    # 3) サブBOT
+    # 2) サブBOT
     try:
         from sub.bot import start as start_sub
         tasks.append(asyncio.create_task(start_sub()))
