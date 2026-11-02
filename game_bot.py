@@ -16,6 +16,13 @@ main.py — ランチャー: メインBOT → YWP BOT → サブBOT の順に読
 """
 
 import asyncio
+import sys
+from pathlib import Path
+
+# YWPフォルダを検索パスに追加 → これが決め手！
+BASE_DIR = Path(__file__).resolve().parent
+YWP_DIR = BASE_DIR / "YWP"
+sys.path.insert(0, str(YWP_DIR))
 
 
 async def _run_all():
@@ -29,13 +36,15 @@ async def _run_all():
     except Exception as e:
         print(f"⚠️ メインBOTの読み込みに失敗: {e}")
 
-    # 2) YWP BOT  ← 新規追加
+    # 2) YWP BOT
     try:
         from YWP.bot import start as start_ywp
         tasks.append(asyncio.create_task(start_ywp()))
         print("✅ YWP BOTを読み込みました。")
     except Exception as e:
         print(f"⚠️ YWP BOTの読み込みに失敗: {e}")
+        import traceback
+        traceback.print_exc()
 
     # 3) サブBOT
     try:
