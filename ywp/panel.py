@@ -3180,34 +3180,21 @@ class ProgressActionSelect(ui.Select):
             discord.SelectOption(label="予約状況", value="queue", emoji="📋",
                                  description="予約キューの待機状況を表示"),
         ]
-        super().__init__(
+                super().__init__(
             placeholder="進行 / ステージ操作を選択...",
             options=options,
             custom_id="ywp_panel:progress_select",
             min_values=1, max_values=1,
         )
 
-        async def callback(self, interaction: discord.Interaction):
-        v = self.values[0]
-        
-        # ★ここから追加
-        if v == "dm_stages":
-            if not await safe_defer(interaction):
-                return
-            acc = get_active_account(interaction.user.id)
-            if not acc:
-                return await safe_reply(interaction, content="❌ ログインしていません。", ephemeral=True)
-            
-            client = build_client_from_account(acc)
-            try:
-                await asyncio.to_thread(client.login, acc["userId"])
-                update_account_tokens(interaction.user.id, client)
-            except Exception as e:
-                return await safe_reply(interaction, content=f"❌ ログイン失敗: `{str(e)[:200]}`", ephemeral=True)
-
-            stages = await asyncio.to_thread(client.get_all_stages_detail)
+                stages = await asyncio.to_thread(client.get_all_stages_detail)
             if not stages:
                 return await safe_reply(interaction, content="❌ ステージ情報がありません。", ephemeral=True)
+
+        if v == "stages":
+            if not await safe_defer(interaction):
+                return
+            # ... (この下は元のコードが続く)
 
             # テキストファイルの作成
             lines = [f"=== {acc.get('player_name', '不明')} のクリア済みステージ一覧 ==="]
