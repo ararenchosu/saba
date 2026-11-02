@@ -67,6 +67,20 @@ def _schedule_panels_refresh():
 
 
 
+# ===== Intents 設定（ここから）=====
+import discord
+from discord.ext import commands
+
+# すべてのIntentsを有効化
+intents = discord.Intents.all()
+
+# Bot本体の作成
+bot = commands.Bot(
+    command_prefix="/",  # もともとの設定に合わせて
+    intents=intents,
+    help_command=None  # もし元からあればそのままでOK
+)
+# ===== Intents 設定（ここまで）=====
 
 # ============================================================================
 # 設定
