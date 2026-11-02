@@ -8,6 +8,9 @@ sub/bot.py — サブBOT（本格用）の本体
 """
 
 import time
+import os
+import json
+from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -34,17 +37,31 @@ from sub.invites import InvitePanelView
 from sub.casino import CasinoPanelView
 from sub.utility import PollView, GiveawayView, utility_loop
 from sub.userdata import utility as utility_store
+
 # ===== ぷにぷに機能をインポート =====
-import sys
-from pathlib import Path
 YWP_DIR = Path(__file__).resolve().parent.parent / "YWP"
+import sys
 sys.path.insert(0, str(YWP_DIR))
 
-# YWPのコマンド/パネルを読み込み
 import ywp_auto
-# 必要な変数をインポート
-from ywp_auto import (setup_log, resolve_token,  # 他必要なもの
-                      BATTLE_TIME_MIN, RANK_NAMES)
+from ywp_auto import setup_log, BATTLE_TIME_MIN, RANK_NAMES
+
+# ✅ resolve_token の代わりの自前取得関数
+def get_ywp_token():
+    """YWP用トークンを環境変数またはconfig.jsonから取得"""
+    token = os.getenv("YWP_DISCORD_TOKEN")
+    if token:
+        return token
+    cfg_path = YWP_DIR / "config.json"
+    if cfg_path.exists():
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                return cfg.get("token")
+        except Exception:
+            pass
+    return None
+# ==================================
 
 
 @bot.tree.command(name="bothelp", description="コマンド一覧を表示する")
@@ -135,11 +152,7 @@ async def on_tree_error(interaction: discord.Interaction, error: app_commands.Ap
         pass
 
 
-
 # ---------------- ステータスのローテーション ----------------
-# 15秒ごとに「稼働中サーバー数 → 各コマンドの説明」を順番に表示する。
-# 管理者向けコマンドは末尾に（管理者用）を付ける（オーナー専用コマンドはその旨を付ける）。
-
 def _status_entries():
     entries = [f"{len(bot.guilds)} 件のサーバーで稼働中 | /help でコマンド一覧"]
     for cmd in bot.tree.get_commands():
@@ -155,7 +168,6 @@ def _status_entries():
             label = "（管理者用）"
             desc = desc[: -len("（管理系）")]
         elif desc.endswith("・管理系）"):
-            # 例:「（ユーザーID指定・管理系）」→「（ユーザーID指定）」＋（管理者用）
             label = "（管理者用）"
             desc = desc[: -len("・管理系）")] + "）"
         entries.append(f"/{cmd.name}：{desc}{label}"[:128])
@@ -183,22 +195,21 @@ async def rotate_status():
 @bot.event
 async def on_ready():
     print(f"ログイン完了: {bot.user} (ID: {bot.user.id})")
-    # スラッシュコマンドを同期
     try:
         synced = await bot.tree.sync()
         print(f"スラッシュコマンド同期: {len(synced)}件")
     except Exception as e:
         print(f"スラッシュコマンド同期失敗: {e}")
-    # 設置済みパネルのボタンを復旧
+    
     bot.add_view(RulesView())
     bot.add_view(RecruitPanelView())
     bot.add_view(IntroPanelView())
-    bot.add_view(settings.SettingsView())  # 設定パネルを永続化（再起動後もボタンが効く）
+    bot.add_view(settings.SettingsView())
     bot.add_view(TicketPanelView())
     bot.add_view(TicketCloseView())
     bot.add_view(InvitePanelView())
     bot.add_view(CasinoPanelView())
-    # 進行中の投票・抽選のボタンを復旧
+    
     for mid in utility_store.data.get("polls", {}):
         try:
             bot.add_view(PollView(int(mid)), message_id=int(mid))
@@ -210,6 +221,7 @@ async def on_ready():
                 bot.add_view(GiveawayView(int(mid)), message_id=int(mid))
             except Exception as e:
                 print(f"抽選復旧失敗 mid={mid}: {e}")
+    
     if not utility_loop.is_running():
         utility_loop.start()
     for gid, cfg in store.configs.items():
@@ -219,7 +231,6 @@ async def on_ready():
                 bot.add_view(RolePanelView(cfg), message_id=panels["roles"]["message_id"])
             except Exception as e:
                 print(f"ロールパネル復旧失敗 guild={gid}: {e}")
-    # 進行中の募集カードのボタンを復旧
     for rid, rec in store.recruitments.items():
         if rec.get("status") == "open" and rec.get("message_id"):
             try:
@@ -228,12 +239,14 @@ async def on_ready():
                 print(f"募集カード復旧失敗 rid={rid}: {e}")
     if not expire_recruitments.is_running():
         expire_recruitments.start()
+    
     try:
         await bot.change_presence(activity=discord.Game(name=f"{len(bot.guilds)} 件のサーバーで稼働中 | /help でコマンド一覧"))
     except Exception:
         pass
     if not rotate_status.is_running():
         rotate_status.start()
+    
     print("------ サブBOT（本格用） 起動完了 ------")
 
 
@@ -242,4 +255,13 @@ async def start():
     if not TOKEN:
         print("⚠️ サブBOTのトークン（SUB_DISCORD_TOKEN）が未設定のため、サブBOTは起動しません。")
         return
+    
+    # ぷにぷにログ準備
+    try:
+        log_path = setup_log(tee=True)
+        if log_path:
+            print(f'[ぷにぷに] ログ: {log_path}')
+    except Exception:
+        pass
+    
     await bot.start(TOKEN)
