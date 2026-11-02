@@ -1,7 +1,0 @@
-discord.py>=2.6
-aiohttp
-aiohttp-socks
-requests[socks]
-pycryptodome
-httpx
-playwright
