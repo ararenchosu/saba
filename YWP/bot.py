@@ -6924,7 +6924,7 @@ async def start():
             '  環境変数 YWP_DISCORD_TOKEN に設定するか、\n'
             f'  {CONFIG_FILE} に {{"token": "<Botトークン>"}} を置いてください。')
     
-    # bot.run() は同期用なので非同期スレッドで実行
+    # bot.run() を非同期で実行
     import asyncio
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, lambda: bot.run(token))
