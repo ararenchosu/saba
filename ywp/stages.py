@@ -6,12 +6,12 @@ import json
 import os
 from datetime import datetime
 
-from ywp.auto import Client
-from ywp.core import DATA_DIR
+from ywp_auto import Client
 
 # ============================================================
 # データ
 # ============================================================
+DATA_DIR = "data"
 SESSION_FILE = f"{DATA_DIR}/sessions.json"
 
 
