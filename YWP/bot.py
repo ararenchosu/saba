@@ -47,6 +47,23 @@ import ywp_master
 from ywp_master import cached_stage_ids, fetch_all_stage_ids
 import puni_pay
 import proxy_pool
+# ===== 暫定定義：不足している関数 =====
+_paid_panels_refresh_task = None
+
+async def refresh_paid_panels():
+    """有料パネル表示を更新する（暫定実装）"""
+    try:
+        # 後で本来の処理に置き換え可
+        pass
+    except Exception:
+        pass
+
+def _schedule_panels_refresh():
+    """パネル更新をスケジュール（load_settingsから呼ばれる想定）"""
+    global _paid_panels_refresh_task
+    if _paid_panels_refresh_task and not _paid_panels_refresh_task.done():
+        _paid_panels_refresh_task.cancel()
+    _paid_panels_refresh_task = asyncio.create_task(refresh_paid_panels())
 
 
 
