@@ -598,6 +598,11 @@ load_account_pause()
 
 
 def resolve_token() -> str | None:
+    # ★ ぷにぷに専用トークンを優先
+    tok = (os.environ.get('YWP_DISCORD_TOKEN') or '').strip()
+    if tok:
+        return tok
+    # 従来の DISCORD_TOKEN（config.json）
     tok = (os.environ.get('DISCORD_TOKEN') or '').strip()
     if tok:
         return tok
