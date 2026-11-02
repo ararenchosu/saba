@@ -3162,7 +3162,6 @@ class ProgressActionSelect(ui.Select):
         options = [
             discord.SelectOption(label="ステージ一覧", value="stages", emoji="🎯",
                                  description="クリア済みステージIDを表示"),
-            # ★これを追加
             discord.SelectOption(label="ステージ一覧をDMに送る", value="dm_stages", emoji="📩",
                                  description="全クリア済みステージをtxtファイルでDMに送信"),
             discord.SelectOption(label="ステージ進行", value="progress", emoji="🎯",
@@ -3180,21 +3179,36 @@ class ProgressActionSelect(ui.Select):
             discord.SelectOption(label="予約状況", value="queue", emoji="📋",
                                  description="予約キューの待機状況を表示"),
         ]
-                super().__init__(
+        super().__init__(
             placeholder="進行 / ステージ操作を選択...",
             options=options,
             custom_id="ywp_panel:progress_select",
             min_values=1, max_values=1,
         )
 
-                stages = await asyncio.to_thread(client.get_all_stages_detail)
-            if not stages:
-                return await safe_reply(interaction, content="❌ ステージ情報がありません。", ephemeral=True)
+    async def callback(self, interaction: discord.Interaction):
+        v = self.values[0]
 
-        if v == "stages":
+        # ========================================================
+        # 📩 ステージ一覧をDMに送る
+        # ========================================================
+        if v == "dm_stages":
             if not await safe_defer(interaction):
                 return
-            # ... (この下は元のコードが続く)
+            acc = get_active_account(interaction.user.id)
+            if not acc:
+                return await safe_reply(interaction, content="❌ ログインしていません。", ephemeral=True)
+
+            client = build_client_from_account(acc)
+            try:
+                await asyncio.to_thread(client.login, acc["userId"])
+                update_account_tokens(interaction.user.id, client)
+            except Exception as e:
+                return await safe_reply(interaction, content=f"❌ ログイン失敗: `{str(e)[:200]}`", ephemeral=True)
+
+            stages = await asyncio.to_thread(client.get_all_stages_detail)
+            if not stages:
+                return await safe_reply(interaction, content="❌ ステージ情報がありません。", ephemeral=True)
 
             # テキストファイルの作成
             lines = [f"=== {acc.get('player_name', '不明')} のクリア済みステージ一覧 ==="]
@@ -3202,7 +3216,7 @@ class ProgressActionSelect(ui.Select):
                 lines.append(f"{s['id']}\t{s['name']}")
             
             file_content = "\n".join(lines)
-            
+
             # ファイルとしてDMに送信
             try:
                 dm_channel = await interaction.user.create_dm()
@@ -3214,8 +3228,10 @@ class ProgressActionSelect(ui.Select):
             except Exception as e:
                 await safe_reply(interaction, content=f"❌ 送信失敗: `{str(e)[:100]}`", ephemeral=True)
             return
-        # ★ここまで追加
 
+        # ========================================================
+        # 🎯 ステージ一覧（画面表示）
+        # ========================================================
         if v == "stages":
             if not await safe_defer(interaction):
                 return
@@ -3264,6 +3280,10 @@ class ProgressActionSelect(ui.Select):
                 except Exception:
                     break
             return
+
+        # ========================================================
+        # その他のメニュー処理
+        # ========================================================
         if v == "progress":
             try:
                 await interaction.response.send_modal(ProgressModal())
@@ -3388,7 +3408,6 @@ class ProgressActionSelect(ui.Select):
                 )
             await safe_reply(interaction, embed=embed, ephemeral=True)
             return
-
 
 # ============================================================
 # パネルView
