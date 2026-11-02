@@ -35,16 +35,16 @@ try:
 except ImportError:                             # 未設定なら無くても動く
     ProxyConnector = None
 
-from . import ywp_auto
-from .ywp_auto import (BATTLE_TIME_MIN, BATTLE_TIME_SPREAD, COOLDOWN_MIN, MAX_CLEAR_TIME,
+from YWP.ywp_auto import (BATTLE_TIME_MIN, BATTLE_TIME_SPREAD, COOLDOWN_MIN, MAX_CLEAR_TIME,
                       MIN_BATTLE_CYCLE, RANK_NAMES, RC, TIME_SPREAD, Client, create_save,
                       jitter, link_email, log_line, log_tag, login_email_prepared,
                       current_event_stages, is_trusted, rows, save_udkey_for, server_elapsed,
                       setup_log,
                       trust_set_manual, trust_wins, vip_gacha_status, VipUnavailable)
-from .ywp_master import cached_stage_ids, fetch_all_stage_ids
-from . import puni_pay
-from . import proxy_pool
+from YWP.ywp_master import cached_stage_ids, fetch_all_stage_ids
+from YWP import puni_pay
+from YWP import proxy_pool
+
 
 
 # ============================================================================
