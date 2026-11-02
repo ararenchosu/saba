@@ -6910,10 +6910,8 @@ async def on_tree_error(interaction: discord.Interaction, error: app_commands.Ap
     await report_error(interaction, error, 'tree')
 
 
-def main():
 async def start():
     """ランチャーから起動するためのエントリーポイント"""
-    # print の出力もAPIの往復も同じファイルに時系列で残す
     path = setup_log(tee=True)
     if path:
         print(f'[log] {path} に記録します（止めるには YWP_LOG=0）')
@@ -6923,8 +6921,6 @@ async def start():
             'YWP_DISCORD_TOKEN が設定されていません。\n'
             '  環境変数 YWP_DISCORD_TOKEN に設定するか、\n'
             f'  {CONFIG_FILE} に {{"token": "<Botトークン>"}} を置いてください。')
-    
-    # bot.run() を実行
     await bot.start(token)
 
 
