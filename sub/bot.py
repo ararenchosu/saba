@@ -3,14 +3,13 @@
 sub/bot.py — サブBOT（本格用）の本体
 
 コマンド登録・起動時のパネル復旧・スラッシュコマンド同期を担当。
-実際の起動はランチャー main.py から start() が呼ばれて行われます。
+実際の起動はランチャー game_bot.py から start() が呼ばれて行われます。
 機能モジュールはこの sub/ フォルダ内の各モジュール。トークンは SUB_DISCORD_TOKEN。
 """
 
 import time
 import os
 import json
-from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -37,31 +36,6 @@ from sub.invites import InvitePanelView
 from sub.casino import CasinoPanelView
 from sub.utility import PollView, GiveawayView, utility_loop
 from sub.userdata import utility as utility_store
-
-# ===== ぷにぷに機能をインポート =====
-YWP_DIR = Path(__file__).resolve().parent.parent / "YWP"
-import sys
-sys.path.insert(0, str(YWP_DIR))
-
-import ywp_auto
-from ywp_auto import setup_log, BATTLE_TIME_MIN, RANK_NAMES
-
-# ✅ resolve_token の代わりの自前取得関数
-def get_ywp_token():
-    """YWP用トークンを環境変数またはconfig.jsonから取得"""
-    token = os.getenv("YWP_DISCORD_TOKEN")
-    if token:
-        return token
-    cfg_path = YWP_DIR / "config.json"
-    if cfg_path.exists():
-        try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-                return cfg.get("token")
-        except Exception:
-            pass
-    return None
-# ==================================
 
 
 @bot.tree.command(name="bothelp", description="コマンド一覧を表示する")
@@ -251,17 +225,8 @@ async def on_ready():
 
 
 async def start():
-    """サブBOTを起動する（ランチャー main.py から呼ばれる）"""
+    """サブBOTを起動する（ランチャー game_bot.py から呼ばれる）"""
     if not TOKEN:
         print("⚠️ サブBOTのトークン（SUB_DISCORD_TOKEN）が未設定のため、サブBOTは起動しません。")
         return
-    
-    # ぷにぷにログ準備
-    try:
-        log_path = setup_log(tee=True)
-        if log_path:
-            print(f'[ぷにぷに] ログ: {log_path}')
-    except Exception:
-        pass
-    
     await bot.start(TOKEN)
