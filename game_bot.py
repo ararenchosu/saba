@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-1プロセスで全部起動：メイン + サブ + YWP(ちょすbot#6538)
+メイン + サブ（ぷにぷに同梱）
 """
 import asyncio
 import sys
@@ -17,12 +17,8 @@ async def start_main_bot():
 
 
 async def start_sub_bot():
+    # サブBotにYWP機能を追加
     from sub.bot import start as _start
-    await _start()
-
-
-async def start_ywp_bot():
-    from YWP.bot import start as _start
     await _start()
 
 
@@ -31,21 +27,15 @@ async def _run_all():
 
     try:
         tasks.append(asyncio.create_task(start_main_bot()))
-        print("✅ メインBOT 起動開始")
+        print("✅ メインBOT 起動")
     except Exception as e:
         print(f"⚠️ メイン失敗: {e}")
 
     try:
         tasks.append(asyncio.create_task(start_sub_bot()))
-        print("✅ サブBOT 起動開始")
+        print("✅ サブBOT（ぷにぷに同梱） 起動")
     except Exception as e:
         print(f"⚠️ サブ失敗: {e}")
-
-    try:
-        tasks.append(asyncio.create_task(start_ywp_bot()))
-        print("✅ YWP(ぷにぷに)BOT 起動開始")
-    except Exception as e:
-        print(f"⚠️ YWP失敗: {e}")
         import traceback
         traceback.print_exc()
 
@@ -53,7 +43,7 @@ async def _run_all():
         print("❌ 起動するものがない")
         return
 
-    print(f"🚀 計{len(tasks)}体 一斉起動")
+    print(f"🚀 計{len(tasks)}体 起動")
     await asyncio.gather(*tasks)
 
 
