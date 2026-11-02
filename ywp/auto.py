@@ -628,13 +628,12 @@ class Client:
         return {}
 
     def get_all_stages_detail(self):
-        """セーブデータから解放済みの全ステージIDと名前を取得（名前はマスタから補完）"""
+        """セーブデータから解放済みの全ステージIDを取得（名前なし）"""
         stage_raw = self.save.get('ywp_user_stage')
         if not stage_raw:
             return []
         
-        # 1. セーブデータから解放済みIDを取得
-        unlocked_ids = set()
+        stage_list = []
         for row in str(stage_raw).split('*'):
             if not row:
                 continue
@@ -642,20 +641,11 @@ class Client:
             try:
                 sid = int(cols[0])
                 if 1 <= sid <= 99999999:
-                    unlocked_ids.add(sid)
+                    stage_list.append({"id": sid})
             except (ValueError, IndexError):
                 pass
-        
-        # 2. マスタデータから名前を取得
-        master_map = self.get_stage_master()
-        
-        # 3. 結果をまとめる
-        stage_list = []
-        for sid in sorted(unlocked_ids):
-            name = master_map.get(sid, "不明")
-            stage_list.append({"id": sid, "name": name})
                 
-        return stage_list
+        return sorted(stage_list, key=lambda x: x["id"])
 
 
 # ============================================================================
