@@ -6,7 +6,7 @@ import json
 import os
 from datetime import datetime
 
-from ywp_auto import Client
+from auto.py import Client
 
 # ============================================================
 # データ
