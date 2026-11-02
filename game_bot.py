@@ -22,52 +22,18 @@ async def start_sub_bot():
 
 
 async def start_ywp_bot():
-    """ぷにぷにBOTを起動"""
-    from YWP.bot import main as _main
-    # YWP/bot.py の main() は asyncio.run() を内部で呼ぶので、
-    # ここでは直接 bot.start() を呼ぶ
-    from YWP.bot import bot as ywp_bot, resolve_token, setup_log
-    path = setup_log(tee=True)
-    if path:
-        print(f"[ぷにぷに] ログ: {path}")
-    token = resolve_token()
-    if not token:
-        print("⚠️ ぷにぷにBOTのトークンが未設定のため、ぷにぷにBOTは起動しません。")
-        return
-    await ywp_bot.start(token)
+    from YWP.bot import start as _start
+    await _start()
 
 
 async def _run_all():
-    tasks = []
-
-    try:
-        tasks.append(asyncio.create_task(start_main_bot()))
-        print("✅ メインBOT 起動")
-    except Exception as e:
-        print(f"⚠️ メイン失敗: {e}")
-
-    try:
-        tasks.append(asyncio.create_task(start_sub_bot()))
-        print("✅ サブBOT 起動")
-    except Exception as e:
-        print(f"⚠️ サブ失敗: {e}")
-        import traceback
-        traceback.print_exc()
-
-    try:
-        tasks.append(asyncio.create_task(start_ywp_bot()))
-        print("✅ ぷにぷにBOT 起動")
-    except Exception as e:
-        print(f"⚠️ ぷにぷに失敗: {e}")
-        import traceback
-        traceback.print_exc()
-
-    if not tasks:
-        print("❌ 起動するものがない")
-        return
-
+    tasks = [
+        asyncio.create_task(start_main_bot()),
+        asyncio.create_task(start_sub_bot()),
+        asyncio.create_task(start_ywp_bot()),
+    ]
     print(f"🚀 計{len(tasks)}体 起動")
-    await asyncio.gather(*tasks)
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 if __name__ == "__main__":
