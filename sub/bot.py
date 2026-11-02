@@ -34,6 +34,18 @@ from sub.invites import InvitePanelView
 from sub.casino import CasinoPanelView
 from sub.utility import PollView, GiveawayView, utility_loop
 from sub.userdata import utility as utility_store
+# ===== ぷにぷに機能をインポート =====
+import sys
+from pathlib import Path
+YWP_DIR = Path(__file__).resolve().parent.parent / "YWP"
+sys.path.insert(0, str(YWP_DIR))
+
+# YWPのコマンド/パネルを読み込み
+import ywp_auto
+# 必要な変数をインポート
+from ywp_auto import (setup_log, resolve_token,  # 他必要なもの
+                      BATTLE_TIME_MIN, RANK_NAMES)
+
 
 @bot.tree.command(name="bothelp", description="コマンド一覧を表示する")
 async def cmd_help(interaction: discord.Interaction):
