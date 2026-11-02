@@ -6911,6 +6911,8 @@ async def on_tree_error(interaction: discord.Interaction, error: app_commands.Ap
 
 
 def main():
+async def start():
+    """ランチャーから起動するためのエントリーポイント"""
     # print の出力もAPIの往復も同じファイルに時系列で残す
     path = setup_log(tee=True)
     if path:
@@ -6921,7 +6923,16 @@ def main():
             'YWP_DISCORD_TOKEN が設定されていません。\n'
             '  環境変数 YWP_DISCORD_TOKEN に設定するか、\n'
             f'  {CONFIG_FILE} に {{"token": "<Botトークン>"}} を置いてください。')
-    bot.run(token)
+    
+    # bot.run() は同期用なので非同期スレッドで実行
+    import asyncio
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, lambda: bot.run(token))
+
+
+def main():
+    """単体起動用（従来通り）"""
+    asyncio.run(start())
 
 
 if __name__ == '__main__':
