@@ -8,9 +8,9 @@ import time
 import random
 from datetime import datetime
 
-from auto import Client, login_email, RC
-from panel import run_farm
-from core import DATA_DIR
+from ywp.auto import Client, login_email, RC
+from ywp.panel import run_farm
+from ywp.core import DATA_DIR
 
 # ============================================================
 # データファイル
