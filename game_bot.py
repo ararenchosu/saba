@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 メイン + サブ + ぷにぷに を1プロセスで起動するランチャー
+
+YWPフォルダを検索パスに追加し、各Botの start() を呼ぶ。
 """
 import asyncio
 import sys
@@ -22,18 +24,42 @@ async def start_sub_bot():
 
 
 async def start_ywp_bot():
+    """ぷにぷにBOTを起動"""
     from YWP.bot import start as _start
     await _start()
 
 
 async def _run_all():
-    tasks = [
-        asyncio.create_task(start_main_bot()),
-        asyncio.create_task(start_sub_bot()),
-        asyncio.create_task(start_ywp_bot()),
-    ]
+    tasks = []
+
+    try:
+        tasks.append(asyncio.create_task(start_main_bot()))
+        print("✅ メインBOT 起動")
+    except Exception as e:
+        print(f"⚠️ メイン失敗: {e}")
+
+    try:
+        tasks.append(asyncio.create_task(start_sub_bot()))
+        print("✅ サブBOT 起動")
+    except Exception as e:
+        print(f"⚠️ サブ失敗: {e}")
+        import traceback
+        traceback.print_exc()
+
+    try:
+        tasks.append(asyncio.create_task(start_ywp_bot()))
+        print("✅ ぷにぷにBOT 起動")
+    except Exception as e:
+        print(f"⚠️ ぷにぷに失敗: {e}")
+        import traceback
+        traceback.print_exc()
+
+    if not tasks:
+        print("❌ 起動するものがない")
+        return
+
     print(f"🚀 計{len(tasks)}体 起動")
-    await asyncio.gather(*tasks, return_exceptions=True)
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
