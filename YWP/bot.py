@@ -6931,5 +6931,8 @@ async def start():
         print(f'[log] {path} に記録します（止めるには YWP_LOG=0）')
     token = resolve_token()
     if not token:
-        raise SystemExit(...)
+        raise SystemExit(
+            'DISCORD_TOKEN が設定されていません。\n'
+            '  環境変数 YWP_DISCORD_TOKEN に設定するか、\n'
+            f'  {CONFIG_FILE} に {{"token": "<Botトークン>"}} を置いてください。')
     await bot.start(token)
