@@ -350,10 +350,6 @@ LOT_DROP_RATE = 1.0    # 先頭桁が1のときに当たりとして申告する
 _lot_seen = {}
 
 def parse_lot_info(raw, mode=None):
-    """抽選情報を (checkKey, ドロップしたID) に分解する
-
-    ドロップしていない／判断できない場合は ID に None を返す。
-    """
     mode = LOT_DROP_MODE if mode is None else mode
     s = raw if isinstance(raw, str) else ''
     parts = s.split('|')
@@ -363,6 +359,14 @@ def parse_lot_info(raw, mode=None):
     tail = parts[1].strip()
     if not tail.lstrip('-').isdigit():
         return key, None
+    n = int(tail)
+    if n <= 0:
+        return key, None
+    if mode == 'bits':
+        # if tail[0] != '1':          # ← コメントアウト
+        #     return key, None        # ← コメントアウト
+        return (key, 0) if random.random() < LOT_DROP_RATE else (key, None)
+    # ...
     n = int(tail)
     if mode == 'bits':
         # 実機キャプチャ（敵28体）で確定した読み方。後半は 5桁のビット列で、
