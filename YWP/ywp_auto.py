@@ -364,8 +364,6 @@ def parse_lot_info(raw, mode=None):
     if not tail.lstrip('-').isdigit():
         return key, None
     n = int(tail)
-    if n <= 0:
-        return key, None            # 0 はどの解釈でも「なし」
     if mode == 'bits':
         # 実機キャプチャ（敵28体）で確定した読み方。後半は 5桁のビット列で、
         # 同じ '11111' から dropYoukaiFlg=0 と 1 の両方が送られている
