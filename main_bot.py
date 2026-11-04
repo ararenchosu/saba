@@ -25,6 +25,44 @@ from recruit import RecruitPanelView, RecruitCardView, expire_recruitments
 from intro import IntroPanelView
 from invites import InvitePanelView
 
+# ===== スマホ表示パッチ（接続種別をモバイルに寄せる） =====
+# 接続時の自己申告（identify の properties）を Discord iOS に書き換えて、
+# メンバーリストのオンライン表示をスマホ型アイコンにする。
+# 公式のステータス設定ではなく接続プロパティの書き換えのため、
+# Discord 側の仕様変更で効かなくなる場合がある。
+def _apply_mobile_status_patch() -> None:
+    try:
+        import discord.gateway as _gw
+    except Exception:
+        return
+    _classes = []
+    for _name in ("DiscordWebSocket", "DiscordClientWebSocket", "DiscordShardWebSocket"):
+        _found = getattr(_gw, _name, None)
+        if _found is not None and _found not in _classes:
+            _classes.append(_found)
+    for cls in _classes:
+        if getattr(cls, "_mobile_status_patched", False):
+            continue
+        _orig_send = cls.send_as_json
+
+        async def _patched_send(self, data, _orig=_orig_send):
+            try:
+                if isinstance(data, dict) and data.get("op") == 2:
+                    props = (data.get("d") or {}).get("properties")
+                    if isinstance(props, dict):
+                        props["os"] = "iOS"
+                        props["browser"] = "Discord iOS"
+                        props["device"] = "Discord iOS"
+            except Exception:
+                pass
+            return await _orig(self, data)
+
+        cls.send_as_json = _patched_send
+        cls._mobile_status_patched = True
+
+
+_apply_mobile_status_patch()
+
 @bot.tree.command(name="bothelp", description="コマンド一覧を表示する")
 async def cmd_help(interaction: discord.Interaction):
     embed = discord.Embed(title="🤖 コマンド一覧", color=discord.Color.blurple())
