@@ -1537,7 +1537,7 @@ class Client:
             # ★ ここから追加：常にアイテムをドロップさせる
             # 指定されたアイテムIDのリストからランダムに選ぶ
             POSSIBLE_ITEM_IDS = [
-                20703, 29001, 29004, 29100, 28001,
+                29001, 29004,
             ]
             item_flg = 1  # 常にドロップ
             item_id = random.choice(POSSIBLE_ITEM_IDS)
