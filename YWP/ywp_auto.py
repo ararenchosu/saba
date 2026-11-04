@@ -345,7 +345,7 @@ def _peak(total, parts, lo, hi, min_each=0):
 # このため build_game_end はフィールドごとに別方式を指定する。
 # このスイッチを 'off' に戻すと両方ともドロップなし申告に戻る（総合安全弁）。
 LOT_DROP_MODE = 'bits'
-LOT_DROP_RATE = 0.85    # 先頭桁が1のときに当たりとして申告する割合（実機実測 11/13）
+LOT_DROP_RATE = 1.0    # 先頭桁が1のときに当たりとして申告する割合（実機実測 11/13）
 
 _lot_seen = {}
 
