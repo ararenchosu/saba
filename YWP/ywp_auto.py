@@ -360,12 +360,19 @@ def parse_lot_info(raw, mode=None):
     if not tail.lstrip('-').isdigit():
         return key, None
     n = int(tail)
-    if n <= 0:
-        return key, None
+    # ▼▼▼ 変更点: n <= 0 でも強制的に当たりにする ▼▼▼
+    # if n <= 0:
+    #     return key, None
     if mode == 'bits':
-        # if tail[0] != '1':          # ← コメントアウト
-        #     return key, None        # ← コメントアウト
-        return (key, 0) if random.random() < LOT_DROP_RATE else (key, None)
+        # if tail[0] != '1':
+        #     return key, None
+        # return (key, 0) if random.random() < LOT_DROP_RATE else (key, None)
+        return (key, 0)  # 常に当たり
+    if mode == 'flag':
+        return key, 0    # 常に当たり
+    if mode == 'itemid':
+        return key, n if n > 0 else 0  # 0でもアイテムID 0を返す
+    return key, None
     # ...
     n = int(tail)
     if mode == 'bits':
@@ -1513,16 +1520,32 @@ class Client:
             # lotItemInfoList は '|1'=当選のフラグ方式（2026-09-24 観測）。
             # 当選時の dropItemId には、敵データの dropItemId（サーバーが
             # gameStart時点で決めた落下品）をそのまま申告する
+        # enemies
+        enemies = []
+        for i, e in enumerate(en):
+            # サーバーが返した抽選結果をそのまま申告する。読めない形式なら
+            # 従来どおりドロップなしで通す（外れを当たりと言うと弾かれるため）
+            raw_item, raw_yk = e.get('lotItemInfoList'), e.get('lotYoukaiInfoList')
+            _warn_lot('lotItemInfoList', raw_item)
+            _warn_lot('lotYoukaiInfoList', raw_yk)
+            
             m_item = 'off' if LOT_DROP_MODE == 'off' else 'flag'
             item_key, won_item = parse_lot_info(raw_item, m_item)
-            # 妖怪が友だちになったかは、下でまとめて1体だけ決める（befriend_pick）
             yk_key, _ = parse_lot_info(raw_yk, 'off')
             yk_flg = 0
-            item_flg = 1 if won_item is not None else 0
-            item_id = (e.get('dropItemId') or 0) if item_flg else 0
+            
+            # ★ ここから追加：常にアイテムをドロップさせる
+            # 指定されたアイテムIDのリストからランダムに選ぶ
+            POSSIBLE_ITEM_IDS = [
+                20703, 29001, 29004, 29100, 28001,
+            ]
+            item_flg = 1  # 常にドロップ
+            item_id = random.choice(POSSIBLE_ITEM_IDS)
+            
             if item_flg:
-                print(f'[ywp] アイテムドロップ当選を申告: itemId={item_id} '
-                      f'(lotItem={raw_item!r})', flush=True)
+                print(f'[ywp] アイテムドロップ当選を申告: itemId={item_id} (lotItem={raw_item!r})', flush=True)
+            # ★ ここまで追加
+            
             enemies.append({
                 'deadEndOrder': order[i],
                 'deadEndType': 0,
@@ -1532,8 +1555,6 @@ class Client:
                 'dropTreasureFlg': 0,
                 'dropTreasureId': 0,
                 'dropYoukaiCheckKey': yk_key,
-                # dropYoukaiId は元の本文に無いフィールドなので足さない
-                # （知らないキーを増やすと rc=3 で弾かれうる）
                 'dropYoukaiFlg': yk_flg,
                 'enemyId': e.get('enemyId'),
                 'itemId': 0,
