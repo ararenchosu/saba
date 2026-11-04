@@ -3,13 +3,11 @@
 sub/bot.py — サブBOT（本格用）の本体
 
 コマンド登録・起動時のパネル復旧・スラッシュコマンド同期を担当。
-実際の起動はランチャー game_bot.py から start() が呼ばれて行われます。
+実際の起動はランチャー main.py から start() が呼ばれて行われます。
 機能モジュールはこの sub/ フォルダ内の各モジュール。トークンは SUB_DISCORD_TOKEN。
 """
 
 import time
-import os
-import json
 
 import discord
 from discord import app_commands
@@ -37,6 +35,43 @@ from sub.casino import CasinoPanelView
 from sub.utility import PollView, GiveawayView, utility_loop
 from sub.userdata import utility as utility_store
 
+# ===== スマホ表示パッチ（接続種別をモバイルに寄せる） =====
+# 接続時の自己申告（identify の properties）を Discord iOS に書き換えて、
+# メンバーリストのオンライン表示をスマホ型アイコンにする。
+# 公式のステータス設定ではなく接続プロパティの書き換えのため、
+# Discord 側の仕様変更で効かなくなる場合がある。
+def _apply_mobile_status_patch() -> None:
+    try:
+        import discord.gateway as _gw
+    except Exception:
+        return
+    _classes = []
+    for _name in ("DiscordWebSocket", "DiscordClientWebSocket", "DiscordShardWebSocket"):
+        _found = getattr(_gw, _name, None)
+        if _found is not None and _found not in _classes:
+            _classes.append(_found)
+    for cls in _classes:
+        if getattr(cls, "_mobile_status_patched", False):
+            continue
+        _orig_send = cls.send_as_json
+
+        async def _patched_send(self, data, _orig=_orig_send):
+            try:
+                if isinstance(data, dict) and data.get("op") == 2:
+                    props = (data.get("d") or {}).get("properties")
+                    if isinstance(props, dict):
+                        props["os"] = "iOS"
+                        props["browser"] = "Discord iOS"
+                        props["device"] = "Discord iOS"
+            except Exception:
+                pass
+            return await _orig(self, data)
+
+        cls.send_as_json = _patched_send
+        cls._mobile_status_patched = True
+
+
+_apply_mobile_status_patch()
 
 @bot.tree.command(name="bothelp", description="コマンド一覧を表示する")
 async def cmd_help(interaction: discord.Interaction):
@@ -126,7 +161,11 @@ async def on_tree_error(interaction: discord.Interaction, error: app_commands.Ap
         pass
 
 
+
 # ---------------- ステータスのローテーション ----------------
+# 15秒ごとに「稼働中サーバー数 → 各コマンドの説明」を順番に表示する。
+# 管理者向けコマンドは末尾に（管理者用）を付ける（オーナー専用コマンドはその旨を付ける）。
+
 def _status_entries():
     entries = [f"{len(bot.guilds)} 件のサーバーで稼働中 | /help でコマンド一覧"]
     for cmd in bot.tree.get_commands():
@@ -142,6 +181,7 @@ def _status_entries():
             label = "（管理者用）"
             desc = desc[: -len("（管理系）")]
         elif desc.endswith("・管理系）"):
+            # 例:「（ユーザーID指定・管理系）」→「（ユーザーID指定）」＋（管理者用）
             label = "（管理者用）"
             desc = desc[: -len("・管理系）")] + "）"
         entries.append(f"/{cmd.name}：{desc}{label}"[:128])
@@ -169,21 +209,22 @@ async def rotate_status():
 @bot.event
 async def on_ready():
     print(f"ログイン完了: {bot.user} (ID: {bot.user.id})")
+    # スラッシュコマンドを同期
     try:
         synced = await bot.tree.sync()
         print(f"スラッシュコマンド同期: {len(synced)}件")
     except Exception as e:
         print(f"スラッシュコマンド同期失敗: {e}")
-    
+    # 設置済みパネルのボタンを復旧
     bot.add_view(RulesView())
     bot.add_view(RecruitPanelView())
     bot.add_view(IntroPanelView())
-    bot.add_view(settings.SettingsView())
+    bot.add_view(settings.SettingsView())  # 設定パネルを永続化（再起動後もボタンが効く）
     bot.add_view(TicketPanelView())
     bot.add_view(TicketCloseView())
     bot.add_view(InvitePanelView())
     bot.add_view(CasinoPanelView())
-    
+    # 進行中の投票・抽選のボタンを復旧
     for mid in utility_store.data.get("polls", {}):
         try:
             bot.add_view(PollView(int(mid)), message_id=int(mid))
@@ -195,7 +236,6 @@ async def on_ready():
                 bot.add_view(GiveawayView(int(mid)), message_id=int(mid))
             except Exception as e:
                 print(f"抽選復旧失敗 mid={mid}: {e}")
-    
     if not utility_loop.is_running():
         utility_loop.start()
     for gid, cfg in store.configs.items():
@@ -205,6 +245,7 @@ async def on_ready():
                 bot.add_view(RolePanelView(cfg), message_id=panels["roles"]["message_id"])
             except Exception as e:
                 print(f"ロールパネル復旧失敗 guild={gid}: {e}")
+    # 進行中の募集カードのボタンを復旧
     for rid, rec in store.recruitments.items():
         if rec.get("status") == "open" and rec.get("message_id"):
             try:
@@ -213,19 +254,17 @@ async def on_ready():
                 print(f"募集カード復旧失敗 rid={rid}: {e}")
     if not expire_recruitments.is_running():
         expire_recruitments.start()
-    
     try:
         await bot.change_presence(activity=discord.Game(name=f"{len(bot.guilds)} 件のサーバーで稼働中 | /help でコマンド一覧"))
     except Exception:
         pass
     if not rotate_status.is_running():
         rotate_status.start()
-    
     print("------ サブBOT（本格用） 起動完了 ------")
 
 
 async def start():
-    """サブBOTを起動する（ランチャー game_bot.py から呼ばれる）"""
+    """サブBOTを起動する（ランチャー main.py から呼ばれる）"""
     if not TOKEN:
         print("⚠️ サブBOTのトークン（SUB_DISCORD_TOKEN）が未設定のため、サブBOTは起動しません。")
         return
