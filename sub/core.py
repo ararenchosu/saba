@@ -136,20 +136,16 @@ intents.members = True
 intents.guilds = True
 
 class HomeTree(app_commands.CommandTree):
-    """担当サーバー制: 担当外サーバーではスラッシュコマンドを止める（/setserver 自体は常に可）"""
+    """担当サーバー制は廃止（2026-11-05）。全サーバーで動作する。"""
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.guild is None:
-            return True
-        if interaction.command is not None and interaction.command.name == "setserver":
-            return True
-        return is_home(interaction.guild.id)
+        return True
 
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None, tree_cls=HomeTree)
 
 
-# ---------------- 担当サーバー（このBOTが動くサーバーを1つに限定できる） ----------------
+# ---------------- 担当サーバー（廃止済み: home.json は互換のため残置） ----------------
 HOME_PATH = os.path.join(BASE_DIR, "home.json")
 _home = _load_json(HOME_PATH, {})  # {"guild_id": int|None}
 
@@ -159,27 +155,14 @@ def home_guild_id():
 
 
 def is_home(guild_id) -> bool:
-    """担当が未設定なら全サーバーで動く。設定済みならそのサーバーだけ動く"""
-    h = _home.get("guild_id")
-    return h is None or h == guild_id
+    """担当サーバー制は廃止（2026-11-05）。常に対象サーバーとして扱う（全サーバーで動作）。"""
+    return True
 
 
 def set_home_guild(guild_id):
     _home["guild_id"] = guild_id
     _save_json(HOME_PATH, _home)
 
-
-
-@bot.tree.command(name="setserver", description="このサーバーをこのBOTの担当サーバーに設定する（管理者用）")
-@app_commands.checks.has_permissions(administrator=True)
-async def cmd_setserver(interaction: discord.Interaction):
-    set_home_guild(interaction.guild.id)
-    await interaction.response.send_message(
-        f"✅ このBOTの担当サーバーを **{interaction.guild.name}** に設定しました。\n"
-        "以降、このBOTは他のサーバーではコマンドもメッセージ反応も止まります。"
-        "担当を変えたいときは、変更先のサーバーでこのBOTの /setserver を実行してください。",
-        ephemeral=True,
-    )
 
 
 async def get_or_create_role(guild: discord.Guild, name: str):
