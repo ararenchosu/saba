@@ -8,7 +8,7 @@ intro.py — 自己紹介: パネル（ボタン→フォーム入力）→ 送�
 import discord
 from discord import app_commands
 
-from sub.core import bot, store
+from sub.core import bot, store, requires
 
 
 def build_intro_embed(display_name: str, avatar_url, fields: list, values: dict) -> discord.Embed:
@@ -98,7 +98,7 @@ async def refresh_intro_panel(guild) -> bool:
 
 
 @bot.tree.command(name="setup_intro", description="このチャンネルに自己紹介パネルを設置する（管理者用）")
-@app_commands.checks.has_permissions(administrator=True)
+@requires(administrator=True)
 async def cmd_setup_intro(interaction: discord.Interaction):
     cfg = store.cfg(interaction.guild.id)
     await interaction.response.send_message(embed=build_intro_panel_embed(cfg), view=IntroPanelView())
@@ -109,7 +109,7 @@ async def cmd_setup_intro(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="setintro", description="このチャンネルを自己紹介の送信先に設定する（管理者用）")
-@app_commands.checks.has_permissions(administrator=True)
+@requires(administrator=True)
 async def cmd_setintro(interaction: discord.Interaction):
     cfg = store.cfg(interaction.guild.id)
     cfg["intro_channel_id"] = interaction.channel.id
