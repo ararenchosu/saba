@@ -11,7 +11,7 @@ sub/tickets.py — チケット（個別問い合わせ）システム（サブB
 import discord
 from discord import app_commands
 
-from sub.core import bot, store, log_event, get_or_create_role
+from sub.core import bot, store, log_event, get_or_create_role, requires
 
 CATEGORY_NAME = "🎫 チケット"
 
@@ -99,7 +99,7 @@ def build_ticket_panel_embed() -> discord.Embed:
 
 
 @bot.tree.command(name="setup_tickets", description="チケット受付パネルをこのチャンネルに設置する（管理者用）")
-@app_commands.checks.has_permissions(administrator=True)
+@requires(administrator=True)
 async def cmd_setup_tickets(interaction: discord.Interaction):
     await interaction.response.send_message(embed=build_ticket_panel_embed(), view=TicketPanelView())
     msg = await interaction.original_response()
