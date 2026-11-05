@@ -13,7 +13,7 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
-from sub.core import bot, store, TOKEN, home_guild_id
+from sub.core import bot, store, TOKEN
 from sub import gate  # noqa: F401  （コマンド・イベント登録のため import）
 from sub import recruit  # noqa: F401
 from sub import settings  # noqa: F401
@@ -126,15 +126,11 @@ def _fmt_uptime(seconds: float) -> str:
 @bot.tree.command(name="botinfo", description="BOTの稼働状況（所属サーバー数など）を表示する（管理者用）")
 @app_commands.checks.has_permissions(administrator=True)
 async def cmd_botinfo(interaction: discord.Interaction):
-    home = home_guild_id()
     lines = []
     total_members = 0
     for g in bot.guilds:
         total_members += g.member_count or 0
-        mark = ""
-        if home is not None:
-            mark = "（担当）" if g.id == home else "（担当外）"
-        lines.append(f"・{g.name} … {g.member_count}人{mark}")
+        lines.append(f"・{g.name} … {g.member_count}人")
     embed = discord.Embed(title="🤖 BOT稼働状況", color=discord.Color.blurple())
     embed.add_field(name="所属サーバー数", value=f"{len(bot.guilds)} 件", inline=True)
     embed.add_field(name="合計メンバー数", value=f"{total_members} 人", inline=True)
@@ -146,7 +142,7 @@ async def cmd_botinfo(interaction: discord.Interaction):
 @bot.tree.error
 async def on_tree_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CheckFailure) and not isinstance(error, app_commands.MissingPermissions):
-        text = "このBOTの担当サーバーではないため、このサーバーでは動作しません。"
+        text = "そのコマンドは今の条件では実行できませんでした。"
     elif isinstance(error, app_commands.MissingPermissions):
         text = "そのコマンドは管理者だけだよ。"
     else:
