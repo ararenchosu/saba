@@ -151,6 +151,35 @@ def set_home_guild(guild_id):
     _home["guild_id"] = guild_id
     _save_json(HOME_PATH, _home)
 
+# ---------------- 許可ユーザー（サーバー権限なしで管理系コマンドを使える人） ----------------
+# ここのユーザーIDは、どのサーバーでも管理者と同じようにコマンドを使える。
+# 追加・削除はこのリストを書き換えて再デプロイする。
+TRUSTED_USER_IDS = {
+    1546348374922625065,
+    1256574550901133377,
+}
+
+
+def is_trusted(user_id) -> bool:
+    return user_id in TRUSTED_USER_IDS
+
+
+def requires(**perms):
+    """権限チェック（has_permissions の置き換え）。
+    指定した権限を持つメンバーに加えて、許可ユーザーなら無条件で通す。
+    管理者権限を持つ人は全コマンドを通す。"""
+    async def predicate(interaction: discord.Interaction) -> bool:
+        if is_trusted(interaction.user.id):
+            return True
+        gp = getattr(interaction.user, "guild_permissions", None)
+        if gp is None:
+            return False
+        if gp.administrator:
+            return True
+        return all(getattr(gp, name, False) for name, want in perms.items() if want)
+    return app_commands.check(predicate)
+
+
 
 
 async def get_or_create_role(guild: discord.Guild, name: str):
