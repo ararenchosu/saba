@@ -12,7 +12,7 @@ from discord.ext import commands, tasks
 
 from discord import app_commands
 
-from sub.core import bot, store
+from sub.core import bot, store, requires
 
 # ---------------- 募集システム ----------------
 def _new_rid() -> str:
@@ -316,7 +316,7 @@ async def expire_recruitments():
 
 # ---------------- セットアップ系コマンド（募集） ----------------
 @bot.tree.command(name="setup_recruit", description="このチャンネルに募集パネルを設置する（管理者用）")
-@app_commands.checks.has_permissions(administrator=True)
+@requires(administrator=True)
 async def cmd_setup_recruit(interaction: discord.Interaction):
     cfg = store.cfg(interaction.guild.id)
     cfg["recruit_channel_id"] = interaction.channel.id
