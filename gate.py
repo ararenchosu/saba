@@ -7,7 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from core import bot, store, get_or_create_role
+from core import bot, store, get_or_create_role, requires
 
 # ---------------- ルール同意ゲート ----------------
 class RulesView(discord.ui.View):
@@ -216,7 +216,7 @@ async def refresh_roles_panel(guild: discord.Guild) -> bool:
 
 # ---------------- セットアップ系コマンド（入口まわり） ----------------
 @bot.tree.command(name="setup_rules", description="このチャンネルにルール同意パネルを設置する（管理者用）")
-@app_commands.checks.has_permissions(administrator=True)
+@requires(administrator=True)
 async def cmd_setup_rules(interaction: discord.Interaction):
     cfg = store.cfg(interaction.guild.id)
     await interaction.response.send_message(embed=build_rules_embed(interaction.guild), view=RulesView())
@@ -227,7 +227,7 @@ async def cmd_setup_rules(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="setup_roles", description="このチャンネルにロール選択パネルを設置する（管理者用）")
-@app_commands.checks.has_permissions(administrator=True)
+@requires(administrator=True)
 async def cmd_setup_roles(interaction: discord.Interaction):
     cfg = store.cfg(interaction.guild.id)
     view = RolePanelView(cfg)
@@ -239,7 +239,7 @@ async def cmd_setup_roles(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="setwelcome", description="このチャンネルを入退室メッセージの投稿先に設定する（管理者用）")
-@app_commands.checks.has_permissions(administrator=True)
+@requires(administrator=True)
 async def cmd_setwelcome(interaction: discord.Interaction):
     cfg = store.cfg(interaction.guild.id)
     cfg["welcome_channel_id"] = interaction.channel.id
@@ -248,7 +248,7 @@ async def cmd_setwelcome(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="setup_gate", description="認証ロールでチャンネルを隠すゲート権限を一括適用する（管理者用）")
-@app_commands.checks.has_permissions(administrator=True)
+@requires(administrator=True)
 async def cmd_setup_gate(interaction: discord.Interaction):
     """認証ロールを持たない人に、ルールチャンネル以外を見せない権限設定を一括適用する"""
     await interaction.response.defer(ephemeral=True)
@@ -282,7 +282,7 @@ async def cmd_setup_gate(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="setlog", description="このチャンネルをモデレーションログ先に設定する（管理者用）")
-@app_commands.checks.has_permissions(administrator=True)
+@requires(administrator=True)
 async def cmd_setlog(interaction: discord.Interaction):
     cfg = store.cfg(interaction.guild.id)
     cfg["log_channel_id"] = interaction.channel.id
