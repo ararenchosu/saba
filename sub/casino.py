@@ -16,7 +16,7 @@ from math import comb
 import discord
 from discord import app_commands
 
-from sub.core import bot, store, is_home
+from sub.core import bot, store, is_home, requires
 from sub.userdata import users
 
 JST = timezone(timedelta(hours=9))
@@ -581,7 +581,7 @@ class CasinoPanelView(discord.ui.View):
 
 
 @bot.tree.command(name="setup_casino", description="このチャンネルにカジノパネルを設置する（管理者用）")
-@app_commands.checks.has_permissions(administrator=True)
+@requires(administrator=True)
 async def cmd_setup_casino(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🎰 カジノ",
