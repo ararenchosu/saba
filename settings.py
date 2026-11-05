@@ -7,7 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from core import bot, store
+from core import bot, store, requires
 from gate import refresh_rules_panel, refresh_roles_panel
 from recruit import refresh_recruit_panel
 from intro import refresh_intro_panel
@@ -633,7 +633,7 @@ def build_settings_embed(cfg: dict) -> discord.Embed:
 
 # ---------------- コマンド ----------------
 @bot.tree.command(name="settings", description="BOT設定パネルを開く（管理者用）")
-@app_commands.checks.has_permissions(administrator=True)
+@requires(administrator=True)
 async def cmd_settings(interaction: discord.Interaction):
     cfg = store.cfg(interaction.guild.id)
     await interaction.response.send_message(embed=build_settings_embed(cfg), view=SettingsView())
