@@ -13,7 +13,7 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
-from sub.core import bot, store, TOKEN
+from sub.core import bot, store, TOKEN, requires
 from sub import gate  # noqa: F401  （コマンド・イベント登録のため import）
 from sub import recruit  # noqa: F401
 from sub import settings  # noqa: F401
@@ -124,7 +124,7 @@ def _fmt_uptime(seconds: float) -> str:
 
 
 @bot.tree.command(name="botinfo", description="BOTの稼働状況（所属サーバー数など）を表示する（管理者用）")
-@app_commands.checks.has_permissions(administrator=True)
+@requires(administrator=True)
 async def cmd_botinfo(interaction: discord.Interaction):
     lines = []
     total_members = 0
@@ -142,7 +142,7 @@ async def cmd_botinfo(interaction: discord.Interaction):
 @bot.tree.error
 async def on_tree_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CheckFailure) and not isinstance(error, app_commands.MissingPermissions):
-        text = "そのコマンドは今の条件では実行できませんでした。"
+        text = "そのコマンドは管理者（または許可されたユーザー）だけだよ。"
     elif isinstance(error, app_commands.MissingPermissions):
         text = "そのコマンドは管理者だけだよ。"
     else:
