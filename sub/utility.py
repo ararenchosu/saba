@@ -16,7 +16,7 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
-from sub.core import bot
+from sub.core import bot, requires
 from sub.userdata import utility
 
 
@@ -111,7 +111,7 @@ class GiveawayView(discord.ui.View):
 
 
 @bot.tree.command(name="giveaway", description="抽選を開始する（参加ボタン式）")
-@app_commands.checks.has_permissions(manage_messages=True)
+@requires(manage_messages=True)
 @app_commands.describe(prize="賞品", minutes="開催時間（分）", winners="当選人数")
 async def cmd_giveaway(interaction: discord.Interaction, prize: str, minutes: int, winners: int = 1):
     minutes = max(1, min(minutes, 60 * 24 * 7))
