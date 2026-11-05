@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
 
-from core import bot, store, is_home, log_event
+from core import bot, store, is_home, log_event, requires
 
 JST = timezone(timedelta(hours=9))
 
@@ -318,7 +318,7 @@ class InviteDeleteView(discord.ui.View):
     app_commands.Choice(name="on（有効にする）", value="on"),
     app_commands.Choice(name="off（無効にする）", value="off"),
 ])
-@app_commands.checks.has_permissions(administrator=True)
+@requires(administrator=True)
 async def cmd_invite_guard(interaction: discord.Interaction, state: str = None):
     cfg = store.cfg(interaction.guild.id)
     if state is None:
@@ -334,7 +334,7 @@ async def cmd_invite_guard(interaction: discord.Interaction, state: str = None):
 
 
 @bot.tree.command(name="invite_delete", description="有効な招待リンクを選んで無効化する（管理者用）")
-@app_commands.checks.has_permissions(administrator=True)
+@requires(administrator=True)
 async def cmd_invite_delete(interaction: discord.Interaction):
     try:
         invites = await interaction.guild.invites()
@@ -354,7 +354,7 @@ async def cmd_invite_delete(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="invites", description="現在有効な招待リンクの一覧を見る（管理者用）")
-@app_commands.checks.has_permissions(administrator=True)
+@requires(administrator=True)
 async def cmd_invites(interaction: discord.Interaction):
     snap = await _snapshot(interaction.guild)
     if snap is None:
@@ -471,7 +471,7 @@ class InviteCreateView(discord.ui.View):
 
 
 @bot.tree.command(name="setup_invite", description="このチャンネルに招待リンク作成パネルを設置する（管理者用）")
-@app_commands.checks.has_permissions(administrator=True)
+@requires(administrator=True)
 async def cmd_setup_invite(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🎟 招待リンク作成",
