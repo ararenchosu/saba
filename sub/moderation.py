@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
 
-from sub.core import bot, store, log_event, is_home
+from sub.core import bot, store, log_event, is_home, requires
 from sub.userdata import modlogs
 
 JST = timezone(timedelta(hours=9))
@@ -101,7 +101,7 @@ def _record(interaction, target, action, reason):
 
 
 @bot.tree.command(name="warn", description="メンバーに警告する（管理系）")
-@app_commands.checks.has_permissions(moderate_members=True)
+@requires(moderate_members=True)
 @app_commands.describe(user="警告する相手", reason="理由")
 async def cmd_warn(interaction: discord.Interaction, user: discord.Member, reason: str = ""):
     if user.bot or user.id == interaction.user.id:
@@ -131,7 +131,7 @@ async def cmd_warn(interaction: discord.Interaction, user: discord.Member, reaso
 
 
 @bot.tree.command(name="warns", description="メンバーの警告・処分履歴を見る（管理系）")
-@app_commands.checks.has_permissions(moderate_members=True)
+@requires(moderate_members=True)
 @app_commands.describe(user="見たい相手")
 async def cmd_warns(interaction: discord.Interaction, user: discord.Member):
     cases = modlogs.cases(interaction.guild.id, user.id)
@@ -145,7 +145,7 @@ async def cmd_warns(interaction: discord.Interaction, user: discord.Member):
 
 
 @bot.tree.command(name="clearwarns", description="メンバーの警告をリセットする（管理系）")
-@app_commands.checks.has_permissions(moderate_members=True)
+@requires(moderate_members=True)
 @app_commands.describe(user="リセットする相手")
 async def cmd_clearwarns(interaction: discord.Interaction, user: discord.Member):
     n = modlogs.clear_warns(interaction.guild.id, user.id)
@@ -154,7 +154,7 @@ async def cmd_clearwarns(interaction: discord.Interaction, user: discord.Member)
 
 
 @bot.tree.command(name="timeout", description="メンバーをタイムアウトする（管理系）")
-@app_commands.checks.has_permissions(moderate_members=True)
+@requires(moderate_members=True)
 @app_commands.describe(user="相手", minutes="分数（最大40320=28日）", reason="理由")
 async def cmd_timeout(interaction: discord.Interaction, user: discord.Member, minutes: int, reason: str = ""):
     minutes = max(1, min(minutes, 40320))
@@ -169,7 +169,7 @@ async def cmd_timeout(interaction: discord.Interaction, user: discord.Member, mi
 
 
 @bot.tree.command(name="untimeout", description="タイムアウトを解除する（管理系）")
-@app_commands.checks.has_permissions(moderate_members=True)
+@requires(moderate_members=True)
 @app_commands.describe(user="相手")
 async def cmd_untimeout(interaction: discord.Interaction, user: discord.Member):
     try:
@@ -183,7 +183,7 @@ async def cmd_untimeout(interaction: discord.Interaction, user: discord.Member):
 
 
 @bot.tree.command(name="kick", description="メンバーをキックする（管理系）")
-@app_commands.checks.has_permissions(kick_members=True)
+@requires(kick_members=True)
 @app_commands.describe(user="相手", reason="理由")
 async def cmd_kick(interaction: discord.Interaction, user: discord.Member, reason: str = ""):
     try:
@@ -197,7 +197,7 @@ async def cmd_kick(interaction: discord.Interaction, user: discord.Member, reaso
 
 
 @bot.tree.command(name="ban", description="メンバーをBANする（管理系）")
-@app_commands.checks.has_permissions(ban_members=True)
+@requires(ban_members=True)
 @app_commands.describe(user="相手", reason="理由")
 async def cmd_ban(interaction: discord.Interaction, user: discord.Member, reason: str = ""):
     try:
@@ -211,7 +211,7 @@ async def cmd_ban(interaction: discord.Interaction, user: discord.Member, reason
 
 
 @bot.tree.command(name="unban", description="BANを解除する（ユーザーID指定・管理系）")
-@app_commands.checks.has_permissions(ban_members=True)
+@requires(ban_members=True)
 @app_commands.describe(user_id="解除するユーザーのID")
 async def cmd_unban(interaction: discord.Interaction, user_id: str):
     try:
