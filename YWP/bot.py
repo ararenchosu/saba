@@ -24,6 +24,7 @@ import time
 import traceback
 import unicodedata
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import discord
@@ -87,6 +88,7 @@ bot = commands.Bot(
 # ============================================================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+JST = ZoneInfo('Asia/Tokyo')
 CONFIG_FILE = os.path.join(BASE_DIR, 'config.json')
 
 DEFAULT_BATTLE_TIME = BATTLE_TIME_MIN   # バトル時間の既定値（秒）
@@ -533,6 +535,76 @@ def maint_window(lead: int = MAINT_LEAD):
 def maint_text(w) -> str:
     st, en = w
     return f'{st:%m/%d %H:%M}〜' + (f'{en:%H:%M}' if en else '（管理者が解除するまで）')
+
+
+def current_event_info() -> dict:
+    """現在のイベント情報と、マップマスタから集約した開催期間を返す"""
+    try:
+        with open(os.path.join(BASE_DIR, 'data', 'current_event.json'), encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            data = dict(data)
+            event_id = data.get('eventId')
+            first_map = data.get('firstMap')
+            maps = _load_map_cache()
+            matching = [m for mid, m in maps.items()
+                        if isinstance(m, dict)
+                        and ((event_id is not None and str(m.get('eventId')) == str(event_id))
+                             or (first_map is not None and mid == int(first_map)))]
+            starts = [m.get('openDt') for m in matching if m.get('openDt')]
+            ends = [m.get('closeDt') for m in matching if m.get('closeDt')]
+            if starts:
+                data['startAt'] = min(starts)
+            if ends:
+                data['endAt'] = max(ends)
+            return data
+    except (OSError, ValueError):
+        return {}
+    return {}
+
+
+def event_deadline():
+    """イベント終了時刻（存在すれば datetime、なしなら None）"""
+    data = current_event_info()
+    if not isinstance(data, dict):
+        return None
+    for key in ('endAt', 'end_at', 'end', 'closeAt', 'close_at', 'finishedAt', 'finish_at', 'until', 'untilAt'):
+        v = data.get(key)
+        if not v:
+            continue
+        try:
+            if isinstance(v, str):
+                if 'T' in v:
+                    parsed = datetime.fromisoformat(v.replace('Z', '+00:00'))
+                    return parsed if parsed.tzinfo else parsed.replace(tzinfo=JST)
+                for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+                    try:
+                        return datetime.strptime(v[:19], fmt).replace(tzinfo=JST)
+                    except ValueError:
+                        continue
+            if isinstance(v, (int, float)):
+                return datetime.fromtimestamp(v, tz=JST)
+        except (ValueError, OSError, OverflowError):
+            continue
+    return None
+
+
+async def wait_event_end(job, lead: int = 300) -> bool:
+    """イベント終了5分前なら自動停止。終了時刻が分からない場合は何もしない"""
+    deadline = event_deadline()
+    if deadline is None:
+        return False
+    now = datetime.now(JST)
+    if deadline - timedelta(seconds=lead) <= now < deadline:
+        if not job.cancel.is_set():
+            job.cancel.set()
+            job.status = f'⏹ イベント終了間近のため自動停止（{deadline:%m/%d %H:%M}）'
+            try:
+                await job.user.send(f'🛑 **#{job.jid}** イベント終了の5分前になったので周回を自動停止しました。')
+            except discord.HTTPException:
+                pass
+        return True
+    return False
 
 
 def maint_start_now(user) -> bool:
@@ -3926,6 +3998,7 @@ async def _run_job(job: FarmJob, email: str, password: str,
             except Exception as e:
                 job.last_error = f'ログイン失敗: {str(e)[:300]}'
                 return
+            remember_maps(c.save)
             job.save_uid = c.userId
             if job.resumed:
                 # 復元したジョブは、止まる前までの稼働時間を引き継ぐ
@@ -4042,6 +4115,8 @@ async def _run_job(job: FarmJob, email: str, password: str,
                 if await wait_while_paused(job):
                     break
                 if await wait_maintenance(job):      # メンテの5分前から新しいバトルを始めない
+                    break
+                if await wait_event_end(job):         # イベント終了5分前なら自動停止
                     break
                 # プリセット：完結したバトル数に応じて周回対象ステージを選ぶ
                 if job.is_preset:
@@ -6933,9 +7008,26 @@ class HitodamaTestView(discord.ui.View):
 
 
 def panel_embed() -> discord.Embed:
+    event = current_event_info()
+    event_name = event.get('name') or '未取得'
+    event_first = event.get('firstMap')
+    event_tail = f'（最初のマップ {event_first}）' if event_first else ''
+    deadline = event_deadline()
+    start_at = str(event.get('startAt') or '')
+    end_at = str(event.get('endAt') or '')
+    period_text = (f' / 開催期間 {start_at[:10]}〜{end_at[:10]}'
+                   if start_at and end_at else '')
+    expired = bool(deadline and deadline <= datetime.now(JST))
+    event_label = '最後に取得したイベント' if expired else '現在のイベント'
+    if expired:
+        deadline_text = '（開催期間終了。最新情報は次回ログイン時に更新）'
+    else:
+        deadline_text = (f'（{deadline:%m/%d %H:%M}の5分前に全周回を自動停止）'
+                         if deadline else '')
     e = discord.Embed(
         title='🎮 ぷにぷに 自動周回',
         description=(
+            f'📌 {event_label}: **{event_name}**{event_tail}{period_text}{deadline_text}\n\n'
             '🎮 **周回開始** … 周回方法（🔢ステージID / 📜プリセット）を選び、'
             'ログインして `セーブデータ` `周回数/目標` を設定して周回\n'
             '📋 **ステージ一覧** … クリア済みステージIDを分類別に表示\n'
@@ -7002,6 +7094,69 @@ def panel_embed() -> discord.Embed:
         inline=False,
     )
     return e
+
+
+EVENT_PANELS_FILE = os.path.join(BASE_DIR, 'data', 'event_panels.json')
+
+
+def _event_panel_records() -> list[dict]:
+    try:
+        with open(EVENT_PANELS_FILE, encoding='utf-8') as f:
+            data = json.load(f)
+        return [p for p in data if isinstance(p, dict)] if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _save_event_panel_records(records: list[dict]):
+    try:
+        os.makedirs(os.path.dirname(EVENT_PANELS_FILE), exist_ok=True)
+        tmp = EVENT_PANELS_FILE + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(records, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, EVENT_PANELS_FILE)
+    except OSError as e:
+        log_line(f'[event] パネル情報の保存に失敗: {e}')
+
+
+def _event_panel_signature() -> str:
+    event = current_event_info()
+    return json.dumps({key: event.get(key) for key in
+                       ('eventId', 'name', 'firstMap', 'startAt', 'endAt')},
+                      ensure_ascii=False, sort_keys=True)
+
+
+async def event_panel_refresh_loop(client):
+    """イベント終了監視と、イベント変更時の周回パネル更新を行う"""
+    while not client.is_closed():
+        for job_list in list(JOBS.values()):
+            for job in list(job_list):
+                await wait_event_end(job)
+        records = _event_panel_records()
+        signature = _event_panel_signature()
+        changed = False
+        keep = []
+        for panel in records:
+            if panel.get('eventSignature') == signature:
+                keep.append(panel)
+                continue
+            try:
+                channel = client.get_channel(int(panel['channel']))
+                if channel is None:
+                    channel = await client.fetch_channel(int(panel['channel']))
+                message = await channel.fetch_message(int(panel['message']))
+                await message.edit(embed=panel_embed(), view=PanelView())
+                panel['eventSignature'] = signature
+                keep.append(panel)
+                changed = True
+            except discord.NotFound:
+                changed = True
+            except (discord.HTTPException, KeyError, TypeError, ValueError) as e:
+                log_line(f'[event] パネル更新失敗 {panel}: {str(e)[:120]}')
+                keep.append(panel)
+        if changed:
+            _save_event_panel_records(keep)
+        await asyncio.sleep(15)
 
 
 def aged_account_embed() -> discord.Embed:
@@ -7189,6 +7344,7 @@ class YWPBot(commands.Bot):
         self.add_view(PaidVipView())
         self.add_view(AdminPanelView())
         await self.tree.sync()
+        self._event_panel_task = asyncio.create_task(event_panel_refresh_loop(self))
 
     async def on_ready(self):
         print(f'[bot] ログイン: {self.user} ({self.user.id})')
@@ -7215,10 +7371,15 @@ async def setup_panel(interaction: discord.Interaction):
         return await interaction.response.send_message(
             '❌ このチャンネルには設置できません。', ephemeral=True)
     try:
-        await channel.send(embed=panel_embed(), view=PanelView())
+        message = await channel.send(embed=panel_embed(), view=PanelView())
     except discord.Forbidden:
         return await interaction.response.send_message(
             '❌ このチャンネルに送信する権限がありません。', ephemeral=True)
+    panels = [p for p in _event_panel_records()
+              if p.get('channel') != channel.id or p.get('message') != message.id]
+    panels.append({'channel': channel.id, 'message': message.id,
+                   'eventSignature': _event_panel_signature()})
+    _save_event_panel_records(panels)
     await interaction.response.send_message('✅ パネルを設置しました。', ephemeral=True)
 
 
