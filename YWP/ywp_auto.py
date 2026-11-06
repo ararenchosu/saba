@@ -344,7 +344,9 @@ def _peak(total, parts, lo, hi, min_each=0):
 #   lotYoukaiInfoList = '00000|00000'          → 後半は5桁。当選時は妖怪IDの見込み（itemid方式）
 # このため build_game_end はフィールドごとに別方式を指定する。
 # このスイッチを 'off' に戻すと両方ともドロップなし申告に戻る（総合安全弁）。
-LOT_DROP_MODE = 'bits'
+# ここでは「Yマネー / Yポイント / ドロップアイテム」を常時拾えるようにするため、
+# 安全寄りの bits ではなく、実機の当落フラグをそのまま使う flag へ切り替える。
+LOT_DROP_MODE = 'flag'
 LOT_DROP_RATE = 0.85    # 先頭桁が1のときに当たりとして申告する割合（実機実測 11/13）
 
 _lot_seen = {}

@@ -4859,10 +4859,11 @@ class FarmModal(discord.ui.Modal, title='ぷにぷに 自動周回'):
             password = self.password_label.component.value
             save_name = save_hint
 
-        # 自動編成の対象ステージを単独で周回するときだけ、ドロップと自動編成を聞く
-        drop_asked = auto_deck = False
+        # Yマネー / Yポイント / ドロップアイテムの取得を常時有効にする。
+        # 自動編成だけは特定の対象ステージでだけ有効にする（その場で聞く）。
+        drop_asked = True
+        auto_deck = False
         if not stage_ids and stage_id == AUTO_DECK_STAGE:
-            drop_asked = True
             ask = DropDeckConfirmView(interaction.user.id)
             await interaction.followup.send(
                 f'🤝 ステージ `{stage_id}` を周回します。\n'
@@ -4873,6 +4874,7 @@ class FarmModal(discord.ui.Modal, title='ぷにぷに 自動周回'):
                 view=ask, ephemeral=True)
             await ask.wait()
             auto_deck = bool(ask.choice)
+            drop_asked = True
 
         # 自動編成を有効にしたときだけ、好物の使い方を聞く
         food_mode = 'off'
