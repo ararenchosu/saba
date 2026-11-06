@@ -2261,17 +2261,49 @@ PRESETS: dict[str, dict] = {
     'メイン第3章': {
         'aliases': ('3章', 'メイン3'),
         'ids': list(range(1003001, 1003027 + 1)),
-        'desc': '第3章 1003001〜1003027（27面）を順番に周回（未解放は gameStart で停止）',
+        'desc': '第3章 1003001〜1003027（27面）を順番に周回（未解放は事前除外＋素通り）',
     },
     'メイン全章': {
         'aliases': ('メイン', '全章'),
-        'ids': (list(range(1001001, 1001016 + 1))
-                + list(range(1002001, 1002021 + 1))
-                + list(range(1003001, 1003027 + 1))),
-        'desc': 'メインステージ全64面（第1〜3章）を順番に周回（クリア済みは飛ばす）',
+        'ids': (list(range(1001001, 1001016 + 1))   # 第1章 map 1001
+                + list(range(1002001, 1002021 + 1))  # 第2章 map 1002
+                + list(range(1003001, 1003027 + 1))  # 第3章 map 1003
+                + list(range(1004001, 1004027 + 1))  # map 1004
+                + list(range(1005001, 1005027 + 1))  # map 1005
+                + list(range(1006001, 1006029 + 1))  # map 1006
+                + list(range(1007001, 1007026 + 1))  # map 1007
+                + list(range(1008001, 1008029 + 1))  # map 1008
+                + list(range(1009001, 1009025 + 1))  # map 1009
+                + list(range(1010001, 1010025 + 1))  # map 1010
+                + list(range(1011001, 1011030 + 1))  # map 1011
+                + list(range(1012001, 1012035 + 1))  # map 1012
+                + list(range(1013001, 1013025 + 1))  # map 1013
+                + list(range(1014001, 1014025 + 1))  # map 1014
+                + list(range(1015001, 1015030 + 1))  # map 1015
+                + list(range(1016001, 1016030 + 1))  # map 1016
+                + list(range(1017001, 1017036 + 1))), # map 1017
+        'desc': ('メインステージ全463面（第1〜3章＋第4章以降 map 1004〜1017）を'
+                 '順番に周回（未解放は事前除外＋素通り）'),
+    },
+    'メイン第4章以降': {
+        'aliases': ('4章', 'メイン4', '第4章以降'),
+        'ids': (list(range(1004001, 1004027 + 1))
+                + list(range(1005001, 1005027 + 1))
+                + list(range(1006001, 1006029 + 1))
+                + list(range(1007001, 1007026 + 1))
+                + list(range(1008001, 1008029 + 1))
+                + list(range(1009001, 1009025 + 1))
+                + list(range(1010001, 1010025 + 1))
+                + list(range(1011001, 1011030 + 1))
+                + list(range(1012001, 1012035 + 1))
+                + list(range(1013001, 1013025 + 1))
+                + list(range(1014001, 1014025 + 1))
+                + list(range(1015001, 1015030 + 1))
+                + list(range(1016001, 1016030 + 1))
+                + list(range(1017001, 1017036 + 1))),
+        'desc': '第4章以降（map 1004〜1017・399面）を順番に周回（未解放は事前除外＋素通り）',
     },
 }
-
 
 def refresh_event_preset():
     """「イベステ全周回」と最深部の面を、今のイベントに合わせる（ywp_auto.current_event_stages）
@@ -3887,6 +3919,31 @@ async def _run_job(job: FarmJob, email: str, password: str,
             # プリセットは未クリアのステージも順番に進む（解放周回が目的）ため
             # 事前チェックしない。battle_start の応答で判定する
             stages = c.stages()
+
+            # ★ 方針B: プリセットから未解放の面を除外する（rc=5 の連続を防ぐ）
+            if job.is_preset and not job.resumed:
+                released = set(stages)
+                before = len(job.stage_ids)
+                job.stage_ids = [s for s in job.stage_ids if s in released]
+                removed = before - len(job.stage_ids)
+                if removed:
+                    log_line(f'プリセットから未解放の {removed}面を除外: '
+                             f'{before} → {len(job.stage_ids)}面')
+                    try:
+                        await job.user.send(
+                            f'📋 **#{job.jid}** プリセットから未解放の **{removed}面** を除外しました'
+                            f'（{before}面 → {len(job.stage_ids)}面）。')
+                    except discord.HTTPException:
+                        pass
+                if not job.stage_ids:
+                    job.last_error = (
+                        'プリセットの全ステージが未解放のため中止しました。\n'
+                        'ゲーム内でステージを進めてから、もう一度お試しください。')
+                    log_line('中止: プリセットの全ステージが未解放')
+                    return
+                if job.stage_pos >= len(job.stage_ids):
+                    job.stage_pos = 0
+
             info = c.raw_info()
             tut = c.save.get('ywp_user_tutorial_list') or ''
             log_line(f'ログイン完了 uid={save_uid} name={job.player_name} '
@@ -3929,7 +3986,7 @@ async def _run_job(job: FarmJob, email: str, password: str,
                                   + ', '.join(f'`{s}`' for s in cand))
                 log_line(f'中止: stage={job.stage_id} が未解放 / 解放済み={sorted(stages)[:20]}')
                 return
-
+                        
             # --- 周回ループ ---
             job.status = '⚔ 周回中'
             await update_progress(job, force=True)
@@ -3991,7 +4048,7 @@ async def _run_job(job: FarmJob, email: str, password: str,
                 code = js.get('resultCode') if isinstance(js, dict) else None
                 sync_hitodama(job, c, js)
 
-                if code != 0:
+                                if code != 0:
                     # ひとだま不足: 止めずに買うか自然回復を待ち、同じ周をやり直す
                     if is_hitodama_shortage(js):
                         log_line(f'ひとだま不足でバトルを始められなかった（待って続ける） #{job.jid}')
@@ -3999,6 +4056,20 @@ async def _run_job(job: FarmJob, email: str, password: str,
                             i -= 1
                             continue
                         break
+
+                    # ★ 方針A: 未解放の面は素通り（プリセットのみ。ひとだま不足は上で除外済み）
+                    if code == 5 and job.is_preset:
+                        log_line(f'未解放のため素通り（gameStart）: stage={job.stage_id} '
+                                 f'pos={job.stage_pos}/{len(job.stage_ids)}')
+                        job.stage_pos += 1
+                        if job.stage_pos >= len(job.stage_ids):
+                            job.status = '🎉 プリセットの全ステージを消化しました'
+                            log_line(f'プリセット完走: {len(job.stage_ids)}面')
+                            break
+                        if await sleep_or_cancel(job, random.uniform(1.0, 2.0)):
+                            break
+                        continue
+
                     job.fail += 1
                     job.done = i
                     errs += 1
@@ -4096,6 +4167,20 @@ async def _run_job(job: FarmJob, email: str, password: str,
                         job.last_error = hitodama_shortage_error(result)
                         job.status = '🔥 ひとだま不足'
                         break
+
+                    # ★ 方針A: 未解放の面は素通り（プリセットのみ。ひとだま不足は上で除外済み）
+                    if code == 5 and job.is_preset:
+                        log_line(f'未解放のため素通り（gameEnd）: stage={job.stage_id} '
+                                 f'pos={job.stage_pos}/{len(job.stage_ids)}')
+                        job.stage_pos += 1
+                        if job.stage_pos >= len(job.stage_ids):
+                            job.status = '🎉 プリセットの全ステージを消化しました'
+                            log_line(f'プリセット完走: {len(job.stage_ids)}面')
+                            break
+                        if await sleep_or_cancel(job, random.uniform(1.0, 2.0)):
+                            break
+                        continue
+
                     job.fail += 1
                     errs += 1
                     print(f'[job] gameEnd失敗 user={job.user.id} #{i} '
