@@ -2529,7 +2529,14 @@ class FarmJob:
         if self.target_key is None or self.target_value is None:
             return False
         now = self.now_points.get(self.target_key)
-        return now is not None and now >= self.target_value
+        if now is None:
+            return False
+        # Yマネー / Yポイントはゲームの上限に近づいたら値が伸びなくなるため、
+        # カンスト後も収集を継続させる。上限を超えた瞬間に止めるのではなく、
+        # この閾値を超えると「目標達成として扱わず、手動停止まで回す」。
+        if self.target_key in WALLET_CAPS and now >= WALLET_CAPS[self.target_key]:
+            return False
+        return now >= self.target_value
 
     @property
     def remaining(self) -> int | None:
@@ -2754,6 +2761,7 @@ def progress_bar(done: int, total: int, width: int = 16) -> str:
 
 WALLET_LABEL = {name: label for name, label, _ in Client.WALLET}
 WALLET_ICON = {'ymoney': '💰', 'ypoint': '🔷', 'hitodama': '🔥'}
+WALLET_CAPS = {'ymoney': 9_999_999, 'ypoint': 9_999_999}
 YPOINT_ITEM = next(src for name, _, src in Client.WALLET if name == 'ypoint')
 
 
