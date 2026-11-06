@@ -4048,7 +4048,8 @@ async def _run_job(job: FarmJob, email: str, password: str,
                 code = js.get('resultCode') if isinstance(js, dict) else None
                 sync_hitodama(job, c, js)
 
-                                if code != 0:
+                                                # ここが正しいインデント（16スペース）
+                if code != 0:
                     # ひとだま不足: 止めずに買うか自然回復を待ち、同じ周をやり直す
                     if is_hitodama_shortage(js):
                         log_line(f'ひとだま不足でバトルを始められなかった（待って続ける） #{job.jid}')
