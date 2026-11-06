@@ -90,14 +90,14 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, 'config.json')
 
 DEFAULT_BATTLE_TIME = BATTLE_TIME_MIN   # バトル時間の既定値（秒）
-DEFAULT_COOLDOWN = 3.0                  # クールダウンの既定値（秒）
+DEFAULT_COOLDOWN = 2.0                  # クールダウンの既定値（秒）
 REQUEST_DELAY = 0.5                     # リクエスト前待機（秒・±30%）
 
-WALLET_REFRESH_EVERY = 20       # 所持数を取り直す間隔（周）。1回につき再ログインが走る
+WALLET_REFRESH_EVERY = 30       # 所持数を取り直す間隔（周）。1回につき再ログインが走る
 WALLET_REFRESH_NEAR = 3         # 目標まで残りこの周数を切ったら毎周確認する
 MAX_CONCURRENT_JOBS = 3         # 全体で同時に走らせるジョブ数の上限（待ちの分は別）
 MAX_JOBS_PER_USER = 5           # 1ユーザーで同時に投げられるジョブ数（複垢代行用）
-PROGRESS_INTERVAL = 6.0         # DM進捗メッセージの最短更新間隔（秒）
+PROGRESS_INTERVAL = 30.0        # DM進捗メッセージの最短更新間隔（秒）
 REFRESH_WAIT = 45.0             # 「🔄 更新」が所持数の取り直しを待つ上限（秒）
 FATAL_CODES = (202, 30)         # これが出たら周回を打ち切る
 TOKEN_CODES = (32,)             # tokenズレ。再ログインで復帰を試みる
@@ -151,7 +151,7 @@ MAIL_WAIT_TIMEOUT = 120.0        # 登録メールを待つ最大秒数
 MAIL_POLL_INTERVAL = 5.0         # メールボックスの再確認間隔（秒）
 MAX_CONCURRENT_ACCOUNTS = 2      # 同時に作成できるアカウント数の上限
 MAX_ACCOUNTS_PER_RUN = 999999   # 1回の操作で指定できる作成数の上限
-ACCOUNT_TXT_THRESHOLD = 10       # この件数以上まとめて作ったら .txt にしてDM送信
+ACCOUNT_TXT_THRESHOLD = 1        # この件数以上まとめて作ったら .txt にしてDM送信
 PLAYER_NAME_MAX = 16             # アカウント名の最大文字数（長すぎるとサーバーが弾く）
 
 # --- 久垢作成（アカウント作成＋セーブ作成＋初回ステージクリアまでやる） ---
@@ -251,7 +251,8 @@ BROWSER_HEADERS = {
 # 差し替えるだけなので、参照側（関数の中や f-string）は今までどおり定数名で
 # 読める。※関数のデフォルト引数やクラス定義時に評価される箇所だけは、
 # 呼び出し時に読み直すよう書き換えてある。
-SETTINGS_FILE = os.path.join(BASE_DIR, 'settings.json')
+SETTINGS_FILE = os.path.abspath(os.path.expanduser(
+    os.environ.get('YWP_SETTINGS_FILE') or os.path.join(BASE_DIR, 'settings.json')))
 
 def parse_rank(raw) -> int:
     """ランクの入力（'ZZ'・'uz+'・'ＺＺ'・'10' など）を番号にする"""
@@ -449,12 +450,18 @@ def load_settings():
 
 
 def save_settings() -> bool:
+    tmp_path = SETTINGS_FILE + '.tmp'
     try:
-        with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
+        with open(tmp_path, 'w', encoding='utf-8') as f:
             json.dump({k: setting_value(k) for k in SETTING_DEFS}, f,
                       ensure_ascii=False, indent=2)
+        os.replace(tmp_path, SETTINGS_FILE)
         return True
     except OSError as e:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
         print(f'[settings] 保存に失敗: {e}')
         return False
 
@@ -3920,30 +3927,6 @@ async def _run_job(job: FarmJob, email: str, password: str,
             # 事前チェックしない。battle_start の応答で判定する
             stages = c.stages()
 
-            # ★ 方針B: プリセットから未解放の面を除外する（rc=5 の連続を防ぐ）
-            if job.is_preset and not job.resumed:
-                released = set(stages)
-                before = len(job.stage_ids)
-                job.stage_ids = [s for s in job.stage_ids if s in released]
-                removed = before - len(job.stage_ids)
-                if removed:
-                    log_line(f'プリセットから未解放の {removed}面を除外: '
-                             f'{before} → {len(job.stage_ids)}面')
-                    try:
-                        await job.user.send(
-                            f'📋 **#{job.jid}** プリセットから未解放の **{removed}面** を除外しました'
-                            f'（{before}面 → {len(job.stage_ids)}面）。')
-                    except discord.HTTPException:
-                        pass
-                if not job.stage_ids:
-                    job.last_error = (
-                        'プリセットの全ステージが未解放のため中止しました。\n'
-                        'ゲーム内でステージを進めてから、もう一度お試しください。')
-                    log_line('中止: プリセットの全ステージが未解放')
-                    return
-                if job.stage_pos >= len(job.stage_ids):
-                    job.stage_pos = 0
-
             info = c.raw_info()
             tut = c.save.get('ywp_user_tutorial_list') or ''
             log_line(f'ログイン完了 uid={save_uid} name={job.player_name} '
@@ -6860,6 +6843,67 @@ async def farm_status(interaction: discord.Interaction):
     else:
         embed, view = jobs_list_embed(jobs), JobsCancelView(jobs)
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+@bot.tree.command(name='診断', description='Botの接続・設定・ジョブ状態を確認します（管理者用）')
+async def diagnose(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        return await interaction.response.send_message(ADMIN_ONLY_MSG, ephemeral=True)
+
+    jobs = [job for user_jobs in JOBS.values() for job in user_jobs
+            if not job.cancel.is_set()]
+    paused = sum(job.is_paused for job in jobs)
+    waiting = sum('順番待ち' in job.status for job in jobs)
+    proxy_count = proxy_pool.size()
+    try:
+        pay_ready = puni_pay.is_ready()
+    except Exception:
+        pay_ready = False
+
+    embed = discord.Embed(
+        title='YWP BOT 診断',
+        color=COLOR_OK if bot.is_ready() else COLOR_WARN,
+        timestamp=datetime.now(),
+    )
+    embed.add_field(
+        name='Discord',
+        value=f"{'接続中' if bot.is_ready() else '未接続'}"
+              + (f'（ping {bot.latency * 1000:.0f} ms）' if bot.is_ready() else ''),
+        inline=True,
+    )
+    embed.add_field(
+        name='周回ジョブ',
+        value=f'稼働 {len(jobs) - paused - waiting} 件 / 順番待ち {waiting} 件 / 一時停止 {paused} 件',
+        inline=True,
+    )
+    embed.add_field(
+        name='ゲームアプリ',
+        value=f'設定バージョン {ywp_auto.APPVER}',
+        inline=True,
+    )
+    embed.add_field(
+        name='設定ファイル',
+        value=(f"config.json: {'あり' if os.path.exists(CONFIG_FILE) else 'なし（環境変数利用可）'}\n"
+               f"settings.json: {'あり' if os.path.exists(SETTINGS_FILE) else 'なし（既定値）'}"),
+        inline=True,
+    )
+    embed.add_field(
+        name='プロキシ',
+        value=f'{proxy_count} 件設定' if proxy_count else '未設定（直接接続）',
+        inline=True,
+    )
+    embed.add_field(
+        name='PayPay',
+        value='利用可能' if pay_ready else '利用不可または未設定',
+        inline=True,
+    )
+    embed.add_field(
+        name='ゲームデータ',
+        value=(f"イベント情報: {'あり' if os.path.exists(os.path.join(BASE_DIR, 'data', 'current_event.json')) else 'なし'}\n"
+               f"マスタキャッシュ: {'あり' if os.path.exists(ywp_master.CACHE_FILE) else '未作成'}"),
+        inline=True,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name='ステージ一覧', description='クリア済みステージIDを分類別に表示します')
