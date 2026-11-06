@@ -253,6 +253,7 @@ BROWSER_HEADERS = {
 # 呼び出し時に読み直すよう書き換えてある。
 SETTINGS_FILE = os.path.abspath(os.path.expanduser(
     os.environ.get('YWP_SETTINGS_FILE') or os.path.join(BASE_DIR, 'settings.json')))
+LAST_FARM_FILE = os.path.join(BASE_DIR, 'last_farm.json')
 
 def parse_rank(raw) -> int:
     """ランクの入力（'ZZ'・'uz+'・'ＺＺ'・'10' など）を番号にする"""
@@ -2576,6 +2577,42 @@ def add_job(job: FarmJob) -> int:
     return job.jid
 
 
+def load_last_farm(user_id: int) -> dict | None:
+    try:
+        with open(LAST_FARM_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        profile = data.get(str(user_id)) if isinstance(data, dict) else None
+        return profile if isinstance(profile, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def save_last_farm(user_id: int, profile: dict) -> bool:
+    try:
+        with open(LAST_FARM_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data[str(user_id)] = profile
+    tmp_path = LAST_FARM_FILE + '.tmp'
+    try:
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, LAST_FARM_FILE)
+        return True
+    except (OSError, TypeError, ValueError) as e:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        print(f'[farm] 前回設定の保存に失敗: {e}')
+        return False
+
+
 def drop_job(job: FarmJob):
     lst = JOBS.get(job.user.id)
     if lst is None:
@@ -4812,7 +4849,8 @@ class FarmModal(discord.ui.Modal, title='ぷにぷに 自動周回'):
             email, password = ctx.email, ctx.password
             vals = (self.save_label.component.values
                     if hasattr(self, 'save_label') else [])
-            save_hint = vals[0] if vals else (str(ctx.save_uid) if ctx.save_uid else None)
+            save_hint = vals[0] if vals else (
+                str(ctx.save_uid or ctx.accs[0].get('userId')) if ctx.accs else None)
             save_name = next(
                 (str(a.get('playerName') or a.get('userId')) for a in ctx.accs
                  if str(a.get('userId')) == (save_hint or '')), None)
@@ -4906,6 +4944,25 @@ class FarmModal(discord.ui.Modal, title='ぷにぷに 自動周回'):
                 'をONにしてから、もう一度お試しください。',
                 ephemeral=True)
 
+        profile_saved = save_last_farm(interaction.user.id, {
+            'email': email,
+            'save_uid': save_hint,
+            'save_name': save_name,
+            'stage_id': stage_id,
+            'stage_ids': stage_ids or [stage_id],
+            'preset_name': preset_name,
+            'count': count,
+            'target_key': tkey,
+            'target_value': tvalue,
+            'target_delta': tdelta,
+            'battle_time': battle_time,
+            'cooldown': cooldown,
+            'drop_asked': drop_asked,
+            'auto_deck': auto_deck,
+            'food_mode': food_mode,
+            'auto_levelup': bool(ask_lv.choice),
+        })
+
         avg_b = 1.0 + BATTLE_TIME_SPREAD / 2   # jitter の期待値倍率（バトル）
         avg_c = 1.0 + TIME_SPREAD / 2          # 同（クールダウン）
         # 連戦間隔の下限（MIN_BATTLE_CYCLE）を下回らないように見積もる
@@ -4944,6 +5001,8 @@ class FarmModal(discord.ui.Modal, title='ぷにぷに 自動周回'):
             f'（1戦あたり約10〜12秒）'
             + save_note + '\n'
             + when +
+            ('> 🔁 前回の条件を保存しました\n' if profile_saved else
+             '> ⚠ 前回の条件を保存できませんでした\n') +
             f'進捗と完了通知は **DM** に送ります。',
             ephemeral=True)
 
@@ -6025,6 +6084,343 @@ class StorySelectView(discord.ui.View):
             await interaction.response.send_modal(LoginModal(name))
         return callback
 
+def _validate_last_farm_profile(profile: dict) -> tuple[dict | None, str | None]:
+    """保存済みプロフィールを検証して、開始可能な辞書に整形する"""
+    try:
+        stage_id = int(profile['stage_id'])
+        stage_ids = [int(value) for value in profile.get('stage_ids') or [stage_id]]
+        count = profile.get('count')
+        count = None if count is None else int(count)
+        target_key = profile.get('target_key')
+        if target_key not in (None, 'ypoint', 'ymoney'):
+            raise ValueError('不明な目標設定です')
+        target_value = profile.get('target_value')
+        target_value = None if target_value is None else int(target_value)
+        target_delta = profile.get('target_delta')
+        target_delta = None if target_delta is None else int(target_delta)
+        battle_time = float(profile['battle_time'])
+        cooldown = float(profile['cooldown'])
+        if stage_id <= 0 or not stage_ids or any(value <= 0 for value in stage_ids):
+            raise ValueError('ステージIDが不正です')
+        if count is not None and count <= 0:
+            raise ValueError('周回数が不正です')
+        if not math.isfinite(battle_time) or not math.isfinite(cooldown):
+            raise ValueError('時間設定が不正です')
+    except (KeyError, TypeError, ValueError) as e:
+        return None, (
+            f'⚠️ 保存された周回設定を読み取れませんでした（{str(e)[:100]}）。'
+            '通常の「周回開始」から設定し直してください。')
+
+    normalized = dict(profile)
+    normalized['stage_id'] = stage_id
+    normalized['stage_ids'] = stage_ids
+    normalized['count'] = count
+    normalized['target_key'] = target_key
+    normalized['target_value'] = target_value
+    normalized['target_delta'] = target_delta
+    normalized['battle_time'] = max(battle_time, BATTLE_TIME_MIN)
+    normalized['cooldown'] = max(cooldown, COOLDOWN_MIN)
+    return normalized, None
+
+
+def _last_farm_preview_embed(profile: dict) -> discord.Embed:
+    stage_id = int(profile.get('stage_id') or 0)
+    stage_ids = [int(value) for value in profile.get('stage_ids') or [stage_id]]
+    stage_name = profile.get('preset_name')
+    stage_text = (f'プリセット **{stage_name}**（{len(stage_ids)}ステージ）'
+                  if stage_name else f'ステージ `{stage_id}`')
+    count = profile.get('count')
+    count_text = '無限' if count is None else f'{count}回'
+    save_name = profile.get('save_name') or profile.get('save_uid') or '不明'
+    target_key = profile.get('target_key')
+    target_summary = 'なし'
+    if target_key == 'ypoint':
+        target_summary = f'Yポイント {profile.get("target_value") or "未設定"}'
+    elif target_key == 'ymoney':
+        target_summary = f'Yマネー {profile.get("target_value") or "未設定"}'
+    elif target_key is not None:
+        target_summary = f'{target_key}'
+
+    e = discord.Embed(
+        title='🔁 前回の周回条件を確認',
+        description='この設定で実行しますか？ 変更したい項目があれば「変更」を押してください。',
+        color=COLOR_INFO,
+    )
+    e.add_field(name='アカウント', value=f'{profile.get("email") or "未設定"} / セーブ **{save_name}**', inline=False)
+    e.add_field(name='周回内容', value=f'{stage_text}\n回数: **{count_text}**\n目標: **{target_summary}**', inline=False)
+    e.add_field(name='時間', value=(f'戦闘 {profile.get("battle_time")}秒 / クールダウン {profile.get("cooldown")}秒'), inline=False)
+    e.add_field(name='追加設定', value=(
+        f'ドロップ: **{"ON" if profile.get("drop_asked") else "OFF"}** / '
+        f'自動編成: **{"ON" if profile.get("auto_deck") else "OFF"}** / '
+        f'好物: **{profile.get("food_mode", "off")}** / '
+        f'Lv自動解放: **{"ON" if profile.get("auto_levelup") else "OFF"}**'), inline=False)
+    return e
+
+
+class FarmRepeatEditModal(discord.ui.Modal, title='周回条件の変更'):
+    """1項目だけを編集するモーダル"""
+
+    def __init__(self, profile: dict, key: str):
+        super().__init__(title=f'変更: {key}')
+        self.profile = profile
+        self.key = key
+        labels = {
+            'stage_id': 'ステージID',
+            'count': '周回数（無限は空欄）',
+            'target_key': '目標種別（ypoint / ymoney / なし）',
+            'target_value': '目標値',
+            'target_delta': '追加目標値',
+            'battle_time': '戦闘時間（秒）',
+            'cooldown': 'クールダウン（秒）',
+            'drop_asked': 'ドロップ（true/false）',
+            'auto_deck': '自動編成（true/false）',
+            'food_mode': '好物モード（off/new/all）',
+            'auto_levelup': 'レベル上限自動解放（true/false）',
+        }
+        default = profile.get(key)
+        if default is None:
+            default = ''
+        elif key in {'drop_asked', 'auto_deck', 'auto_levelup'}:
+            default = 'true' if bool(default) else 'false'
+        elif key in {'food_mode'}:
+            default = str(default)
+        elif isinstance(default, list):
+            default = ','.join(str(v) for v in default)
+        else:
+            default = str(default)
+        self.value = discord.ui.TextInput(
+            label=labels.get(key, key),
+            default=default,
+            required=True,
+            max_length=200,
+        )
+        self.add_item(self.value)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = (self.value.value or '').strip()
+        key = self.key
+        try:
+            if key in {'stage_id', 'count', 'target_value', 'target_delta'}:
+                val = None if raw in ('', 'none', 'null') and key == 'count' else int(raw)
+                if key in {'stage_id'} and val is not None and val <= 0:
+                    raise ValueError
+                if key in {'count'} and val is not None and val <= 0:
+                    raise ValueError
+                if key in {'target_value', 'target_delta'} and val is not None and val < 0:
+                    raise ValueError
+                self.profile[key] = val
+            elif key in {'battle_time', 'cooldown'}:
+                val = float(raw)
+                if not math.isfinite(val) or val <= 0:
+                    raise ValueError
+                self.profile[key] = val
+            elif key in {'drop_asked', 'auto_deck', 'auto_levelup'}:
+                val = raw.lower() in ('1', 'true', 'yes', 'on', 'y')
+                self.profile[key] = val
+            elif key == 'target_key':
+                if raw in ('', 'none', 'null', 'なし'):
+                    self.profile[key] = None
+                elif raw not in ('ypoint', 'ymoney'):
+                    raise ValueError
+                else:
+                    self.profile[key] = raw
+            elif key == 'food_mode':
+                if raw in ('', 'none', 'null', 'なし', 'off'):
+                    self.profile[key] = 'off'
+                elif raw not in ('off', 'new', 'all'):
+                    raise ValueError
+                else:
+                    self.profile[key] = raw
+            else:
+                raise ValueError('未対応の項目です')
+        except ValueError:
+            return await interaction.response.send_message(
+                '❌ 入力値が不正です。数値は整数/小数、真偽値は true/false などで入力してください。',
+                ephemeral=True)
+
+        msg = await interaction.response.send_message(
+            embed=_last_farm_preview_embed(self.profile),
+            view=FarmRepeatPreviewView(self.profile, interaction.user.id),
+            ephemeral=True,
+        )
+
+
+class FarmRepeatEditSelectView(discord.ui.View):
+    """変更する項目を選ぶドロップダウン"""
+
+    def __init__(self, profile: dict, owner_id: int):
+        super().__init__(timeout=180)
+        self.profile = profile
+        self.owner_id = owner_id
+        select = discord.ui.Select(
+            placeholder='変更する項目を選んでください',
+            options=[
+                discord.SelectOption(label='ステージID', value='stage_id'),
+                discord.SelectOption(label='周回数', value='count'),
+                discord.SelectOption(label='目標', value='target_key'),
+                discord.SelectOption(label='目標値', value='target_value'),
+                discord.SelectOption(label='戦闘時間', value='battle_time'),
+                discord.SelectOption(label='クールダウン', value='cooldown'),
+                discord.SelectOption(label='ドロップ', value='drop_asked'),
+                discord.SelectOption(label='自動編成', value='auto_deck'),
+                discord.SelectOption(label='好物', value='food_mode'),
+                discord.SelectOption(label='自動解放', value='auto_levelup'),
+            ],
+        )
+        select.callback = self._picked
+        self.add_item(select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message('この設定変更は自分の周回確認画面からだけ使えます。', ephemeral=True)
+            return False
+        return True
+
+    async def _picked(self, interaction: discord.Interaction):
+        key = interaction.data['values'][0]
+        await interaction.response.send_modal(FarmRepeatEditModal(self.profile, key))
+
+
+class FarmRepeatPreviewView(discord.ui.View):
+    """保存済み周回設定の確認画面"""
+
+    def __init__(self, profile: dict, owner_id: int):
+        super().__init__(timeout=600)
+        self.profile = profile
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message('この確認画面は別の人の周回設定です。', ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label='開始', style=discord.ButtonStyle.success, emoji='▶️', custom_id='ywp:repeat:start')
+    async def start_farm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _start_last_farm(interaction, self.profile)
+
+    @discord.ui.button(label='変更', style=discord.ButtonStyle.primary, emoji='✏️', custom_id='ywp:repeat:edit')
+    async def edit_farm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            '変更したい項目を選んでください。',
+            view=FarmRepeatEditSelectView(self.profile, self.owner_id),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label='キャンセル', style=discord.ButtonStyle.secondary, emoji='❌', custom_id='ywp:repeat:cancel')
+    async def cancel_farm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message('ℹ️ 前回の周回条件はそのままにして終了しました。', ephemeral=True)
+
+
+async def _start_last_farm(interaction: discord.Interaction, profile: dict):
+    email = str(profile.get('email') or '').strip()
+    save_uid = str(profile.get('save_uid') or '').strip()
+    if not email or not save_uid:
+        return await interaction.response.send_message(
+            '⚠️ 保存設定にアカウントまたはセーブデータがありません。通常の「周回開始」から設定し直してください。',
+            ephemeral=True)
+    if not ywp_auto.has_saved_udkey(email):
+        return await interaction.response.send_message(
+            '🔑 保存済みのログイン情報がありません。通常の「周回開始」から一度ログインしてください。',
+            ephemeral=True)
+    existing = next((job for job in jobs_of(interaction.user.id)
+                     if not job.cancel.is_set()
+                     and (job.resume_email == email
+                          or str(job.save_uid or '') == save_uid)), None)
+    if existing is not None:
+        return await interaction.response.send_message(
+            f'⏸ 同じアカウントのジョブ #{existing.jid} が残っています。'
+            '先にそのジョブを中止してから再実行してください。', ephemeral=True)
+    if len(jobs_of(interaction.user.id)) >= MAX_JOBS_PER_USER:
+        return await interaction.response.send_message(
+            f'❌ 同時実行できるのは {MAX_JOBS_PER_USER}ジョブまでです。', ephemeral=True)
+
+    profile, error = _validate_last_farm_profile(profile)
+    if error:
+        return await interaction.response.send_message(error, ephemeral=True)
+
+    stage_id = int(profile['stage_id'])
+    stage_ids = profile['stage_ids']
+    count = profile['count']
+    target_key = profile['target_key']
+    target_value = profile['target_value']
+    target_delta = profile['target_delta']
+    battle_time = profile['battle_time']
+    cooldown = profile['cooldown']
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    job = FarmJob(
+        interaction.user, stage_id, count, battle_time, cooldown,
+        target_key=target_key, target_value=target_value,
+        target_delta=target_delta, stage_ids=stage_ids,
+        preset_name=profile.get('preset_name'))
+    job.drop_asked = bool(profile.get('drop_asked'))
+    job.auto_deck = bool(profile.get('auto_deck'))
+    job.food_mode = profile.get('food_mode', 'off')
+    job.auto_levelup = bool(profile.get('auto_levelup'))
+    job.resume_email = email
+    job.save_uid = save_uid
+    job.player_name = profile.get('save_name')
+    add_job(job)
+
+    try:
+        job.message = await interaction.user.send(
+            embed=progress_embed(job), view=CancelView(job))
+    except discord.Forbidden:
+        drop_job(job)
+        return await interaction.followup.send(
+            '❌ DMを送れません。DMを許可してからもう一度お試しください。', ephemeral=True)
+
+    job.task = asyncio.create_task(run_job(job, email, None, save_uid))
+    stage_text = (f'プリセット **{job.preset_name}**（{len(stage_ids)}ステージ）'
+                  if job.preset_name else f'ステージ `{stage_id}`')
+    count_text = '無限' if count is None else f'{count}回'
+    await interaction.followup.send(
+        f'✅ 前回の条件で周回を開始しました（ジョブ **#{job.jid}**）。\n'
+        f'> {stage_text} / {count_text} / セーブ **{profile.get("save_name") or save_uid}**\n'
+        '> 進捗と完了通知はDMに届きます。', ephemeral=True)
+
+
+async def rerun_last_farm(interaction: discord.Interaction):
+    profile = load_last_farm(interaction.user.id)
+    if not profile:
+        return await interaction.response.send_message(
+            'ℹ️ 保存された周回設定がありません。通常の「周回開始」を一度実行してください。',
+            ephemeral=True)
+
+    email = str(profile.get('email') or '').strip()
+    save_uid = str(profile.get('save_uid') or '').strip()
+    if not email or not save_uid:
+        return await interaction.response.send_message(
+            '⚠️ 保存設定にアカウントまたはセーブデータがありません。通常の「周回開始」から設定し直してください。',
+            ephemeral=True)
+    if not ywp_auto.has_saved_udkey(email):
+        return await interaction.response.send_message(
+            '🔑 保存済みのログイン情報がありません。通常の「周回開始」から一度ログインしてください。',
+            ephemeral=True)
+    existing = next((job for job in jobs_of(interaction.user.id)
+                     if not job.cancel.is_set()
+                     and (job.resume_email == email
+                          or str(job.save_uid or '') == save_uid)), None)
+    if existing is not None:
+        return await interaction.response.send_message(
+            f'⏸ 同じアカウントのジョブ #{existing.jid} が残っています。'
+            '先にそのジョブを中止してから再実行してください。', ephemeral=True)
+    if len(jobs_of(interaction.user.id)) >= MAX_JOBS_PER_USER:
+        return await interaction.response.send_message(
+            f'❌ 同時実行できるのは {MAX_JOBS_PER_USER}ジョブまでです。', ephemeral=True)
+
+    profile, error = _validate_last_farm_profile(profile)
+    if error:
+        return await interaction.response.send_message(error, ephemeral=True)
+    await interaction.response.send_message(
+        embed=_last_farm_preview_embed(profile),
+        view=FarmRepeatPreviewView(profile, interaction.user.id),
+        ephemeral=True,
+    )
+
+
 class PanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -6084,6 +6480,12 @@ class PanelView(discord.ui.View):
             return await interaction.response.send_message(
                 '⏳ アカウント作成が実行中です。完了までお待ちください。', ephemeral=True)
         await interaction.response.send_modal(AccountCountModal())
+
+    @discord.ui.button(label='前回の条件で再周回', style=discord.ButtonStyle.secondary,
+                       emoji='🔁', custom_id='ywp:repeat')
+    async def repeat_farm(self, interaction: discord.Interaction,
+                          button: discord.ui.Button):
+        await rerun_last_farm(interaction)
 
 
 class SettingEditModal(discord.ui.Modal, title='設定の変更'):
@@ -6530,6 +6932,7 @@ def panel_embed() -> discord.Embed:
             '📊 **状況確認** … 実行中の周回をまとめて表示\n'
             '　　　　　　　　 **⏸ 一時停止** / **▶ 再開** / **⏹ 中止** をジョブ単位で操作\n'
             '　　　　　　　　 所持数は **🔄 更新** を押したときだけ取り直します\n'
+            '🔁 **前回の条件で再周回** … 保存したアカウント・セーブ・設定で再スタート\n'
             '🆕 **アカウント作成** … 捨てメールでLEVEL5 ID＋周回用セーブデータを自動作成\n'
             '　　　　　　　　 `作成数` `パスワード固定` `アカウント名` を指定できます。'
             f'**{ACCOUNT_TXT_THRESHOLD}件以上**は `メアド:パスワード` の **.txt** をDMに添付\n'

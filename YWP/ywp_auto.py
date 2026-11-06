@@ -2609,6 +2609,11 @@ def save_udkey_for(email, udkey):
         pass
 
 
+def has_saved_udkey(email):
+    """メールアドレスに対応するUDKeyが保存済みか確認する（新規発行はしない）"""
+    return bool(_load_udkeys().get(email))
+
+
 def udkey_for(email, proxy=None):
     """(udkey, 新規発行か) を返す。保存済みならそれを、無ければ発行して保存"""
     udkey = _load_udkeys().get(email)
