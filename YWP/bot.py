@@ -2247,6 +2247,29 @@ PRESETS: dict[str, dict] = {
         'desc': 'イベント51種（29701001〜13 / 29702001〜15 / 29703001〜17 / '
                 '29704001〜06）を順番に全て周回',
     },
+    # --- 通常（恒常）ステージ進行 ---
+    'メイン第1章': {
+        'aliases': ('1章', 'メイン1'),
+        'ids': list(range(1001001, 1001016 + 1)),
+        'desc': '第1章 1001001〜1001016（16面）を順番に周回（クリア済みは飛ばす）',
+    },
+    'メイン第2章': {
+        'aliases': ('2章', 'メイン2'),
+        'ids': list(range(1002001, 1002021 + 1)),
+        'desc': '第2章 1002001〜1002021（21面）を順番に周回（未解放は gameStart で停止）',
+    },
+    'メイン第3章': {
+        'aliases': ('3章', 'メイン3'),
+        'ids': list(range(1003001, 1003027 + 1)),
+        'desc': '第3章 1003001〜1003027（27面）を順番に周回（未解放は gameStart で停止）',
+    },
+    'メイン全章': {
+        'aliases': ('メイン', '全章'),
+        'ids': (list(range(1001001, 1001016 + 1))
+                + list(range(1002001, 1002021 + 1))
+                + list(range(1003001, 1003027 + 1))),
+        'desc': 'メインステージ全64面（第1〜3章）を順番に周回（クリア済みは飛ばす）',
+    },
 }
 
 
@@ -5871,7 +5894,7 @@ class SaveReadyView(discord.ui.View):
 
 
 class FarmStartView(discord.ui.View):
-    """「周回開始」の周回方法を選ぶ画面（ステージID直指定 / プリセット）
+    """「周回開始」の周回方法を選ぶ画面（ステージID直指定 / 通常ステージ進行 / プリセット）
 
     選ぶと ログイン（メール/パス）→ セーブ選択 → 周回設定 の順に進む。
     """
@@ -5882,21 +5905,56 @@ class FarmStartView(discord.ui.View):
                                    style=discord.ButtonStyle.primary, emoji='🔢')
         manual.callback = self._manual
         self.add_item(manual)
+
+        # ★ 追加: 通常ステージ進行
+        story = discord.ui.Button(label='通常ステージ進行',
+                                  style=discord.ButtonStyle.success, emoji='📖',
+                                  custom_id='ywp:story')
+        story.callback = self._story
+        self.add_item(story)
+
         refresh_event_preset()
         for name, p in PRESETS.items():
             b = discord.ui.Button(label=f'{name}（{len(p["ids"])}ステージ）'[:80],
-                                  style=discord.ButtonStyle.success, emoji='📜')
+                                  style=discord.ButtonStyle.secondary, emoji='📜')
             b.callback = self._make_preset_callback(name)
             self.add_item(b)
 
     async def _manual(self, interaction: discord.Interaction):
         await interaction.response.send_modal(LoginModal())
 
+    # ★ 追加: 通常ステージ進行の範囲選択へ
+    async def _story(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            '📖 通常ステージ進行：どの範囲を進めますか？\n'
+            '（ログイン → セーブ選択 → 周回設定 の順に進みます。'
+            'クリア済みの面は自動で飛ばします）',
+            view=StorySelectView(), ephemeral=True)
+
     def _make_preset_callback(self, name: str):
         async def callback(interaction: discord.Interaction):
             await interaction.response.send_modal(LoginModal(name))
         return callback
 
+
+class StorySelectView(discord.ui.View):
+    """通常ステージ進行の範囲を選ぶ（第1章 / 第2章 / 第3章 / 全章）"""
+
+    def __init__(self):
+        super().__init__(timeout=300)
+        for name in ('メイン第1章', 'メイン第2章', 'メイン第3章', 'メイン全章'):
+            if name not in PRESETS:
+                continue
+            p = PRESETS[name]
+            b = discord.ui.Button(label=f'{name}（{len(p["ids"])}面）'[:80],
+                                  style=discord.ButtonStyle.success, emoji='📖')
+            b.callback = self._make_callback(name)
+            self.add_item(b)
+
+    def _make_callback(self, name: str):
+        async def callback(interaction: discord.Interaction):
+            await interaction.response.send_modal(LoginModal(name))
+        return callback
 
 class PanelView(discord.ui.View):
     def __init__(self):
