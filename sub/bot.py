@@ -29,7 +29,7 @@ from sub import casino  # noqa: F401  （カジノ）
 from sub.gate import RulesView, RolePanelView
 from sub.recruit import RecruitPanelView, RecruitCardView, expire_recruitments
 from sub.intro import IntroPanelView
-from sub.tickets import TicketPanelView, TicketCloseView
+from sub.tickets import TicketPanelView, TicketCloseView, refresh_ticket_panels, restore_report_views
 from sub.invites import InvitePanelView
 from sub.casino import CasinoPanelView
 from sub.utility import PollView, GiveawayView, utility_loop
@@ -218,6 +218,8 @@ async def on_ready():
     bot.add_view(settings.SettingsView())  # 設定パネルを永続化（再起動後もボタンが効く）
     bot.add_view(TicketPanelView())
     bot.add_view(TicketCloseView())
+    await refresh_ticket_panels()
+    restore_report_views()
     bot.add_view(InvitePanelView())
     bot.add_view(CasinoPanelView())
     # 進行中の投票・抽選のボタンを復旧

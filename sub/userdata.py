@@ -15,6 +15,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 USERS_PATH = os.path.join(BASE_DIR, "users.json")
 MODLOGS_PATH = os.path.join(BASE_DIR, "modlogs.json")
 UTILITY_PATH = os.path.join(BASE_DIR, "utility.json")
+REPORTS_PATH = os.path.join(BASE_DIR, "reports.json")
 
 
 def _load(path, default):
@@ -113,6 +114,17 @@ class UtilityStore:
         _save(UTILITY_PATH, self.data)
 
 
+class ReportStore:
+    """通報案件の状態と対応メモ"""
+
+    def __init__(self):
+        self.data = _load(REPORTS_PATH, {})
+
+    def save(self):
+        _save(REPORTS_PATH, self.data)
+
+
 users = UserStore()
 modlogs = ModLogStore()
 utility = UtilityStore()
+reports = ReportStore()
