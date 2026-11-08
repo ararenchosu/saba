@@ -2518,7 +2518,9 @@ class FarmJob:
         # 所持数。セーブはログイン時にしか降ってこないので、節目ごとに取り直す
         self.start_points: dict[str, int] = {}
         self.now_points: dict[str, int] = {}
-        self.start_items: dict[str, int] | None = None
+        self.current_items: dict[str, int] | None = None
+        self.inventory_version = 0
+        self.inventory_update_task: asyncio.Task | None = None
         self.points_at = 0.0          # now_points を取った時刻
         self.points_done = 0          # now_points を取った時点の周回数
         self.refreshes = 0
@@ -2942,11 +2944,6 @@ def progress_embed(job: FarmJob) -> discord.Embed:
     e.add_field(name='🎪 イベントP', value=f'{job.event_point:,}', inline=True)
     e.add_field(name='⏳ 完了予定',
                 value='—（一時停止中）' if job.is_paused else eta_text(job), inline=True)
-    if job.start_items is not None:
-        e.add_field(name='📘 秘伝書（開始時）',
-                    value=inventory_group_text(job.start_items, SECRET_BOOK_IDS), inline=False)
-        e.add_field(name='🟠 経験値玉（開始時）',
-                    value=inventory_group_text(job.start_items, EXP_ORB_IDS), inline=False)
     if job.paused_seconds >= 1:
         e.add_field(name='⏸ 一時停止',
                     value=f'{job.pauses}回 / 計 {fmt_sec(job.paused_seconds)}', inline=True)
@@ -2968,6 +2965,11 @@ def progress_embed(job: FarmJob) -> discord.Embed:
         e.add_field(name='🍙 好物', value=food_text(job), inline=True)
     if job.gacha_youkai:
         e.add_field(name='🎰 ガチャ', value=gacha_text(job), inline=False)
+    if job.current_items is not None:
+        e.add_field(name='📘 秘伝書（所持数）',
+                    value=inventory_group_text(job.current_items, SECRET_BOOK_IDS), inline=False)
+        e.add_field(name='🟠 経験値玉（所持数）',
+                    value=inventory_group_text(job.current_items, EXP_ORB_IDS), inline=False)
     if job.mission_receipts:
         e.add_field(name='🎯 ミッション報酬',
                     value=f'{job.mission_receipts}件受け取り（Yマネー +{job.mission_ymoney:,}）',
@@ -3070,6 +3072,28 @@ async def push_progress(job: FarmJob):
         pass
 
 
+async def _flush_inventory_progress(job: FarmJob):
+    """アイテム数の変更をまとめてDMへ反映し、更新中に起きた変更も取りこぼさない"""
+    while job.message is not None and not job.cancel.is_set():
+        delay = PROGRESS_INTERVAL - (time.time() - job._last_edit)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        if job.message is None or job.cancel.is_set():
+            return
+        version = job.inventory_version
+        await push_progress(job)
+        if version == job.inventory_version:
+            return
+
+
+def schedule_inventory_progress(job: FarmJob):
+    if job.message is None:
+        return
+    task = job.inventory_update_task
+    if task is None or task.done():
+        job.inventory_update_task = asyncio.create_task(_flush_inventory_progress(job))
+
+
 async def report_error(interaction: discord.Interaction, error: Exception, where: str):
     print(f'[{where}] {error}\n{traceback.format_exc()}')
     msg = f'❌ エラーが発生しました: `{str(error)[:200]}`'
@@ -3129,7 +3153,7 @@ _JOB_KEYS = ('jid', 'stage_id', 'stage_ids', 'preset_name', 'count', 'battle_tim
              'done', 'success', 'fail', 'stage_pos', 'event_point', 'hitodama_buys',
              'befriends', 'leader_sets', 'last_leader', 'deck_sorts', 'pauses', 'refreshes',
              'player_name', 'start_points', 'deck_levels_start',
-             'start_items',
+             'current_items',
              'auto_levelup', 'level_unlocks', 'level_unlock_ymoney',
              'mission_receipts', 'mission_ymoney', 'present_receipts', 'food_fed', 'food_won', 'food_bought',
              'food_spent', 'gacha_youkai', 'food_mode', 'grind_stage', 'grind_left',
@@ -3193,6 +3217,8 @@ async def restore_jobs():
         for k in _JOB_KEYS:
             if k in st:
                 setattr(job, k, st[k])
+        if 'current_items' not in st:
+            job.current_items = st.get('start_items')
         job.target_delta = None                     # 増加量指定は開始時に絶対値へ確定済み
         job.befriend_counts = collections.Counter(
             {int(k): v for k, v in (st.get('befriend_counts') or {}).items()})
@@ -3320,11 +3346,18 @@ EXP_ORB_IDS = (20506, 20501, 20502, 20503, 20504, 20505, 20508, 20509)
 
 def inventory_group_text(inventory: dict, item_ids: tuple[int, ...]) -> str:
     items = [
-        f'{item_label(item_id)} × {count:,}'
+        f'・{item_label(item_id)} × {count:,}'
         for item_id in item_ids
         if (count := inventory.get(str(item_id), inventory.get(item_id, 0))) > 0
     ]
-    return ' / '.join(items) if items else 'なし'
+    return '\n'.join(items) if items else '・なし'
+
+
+def tracked_inventory(inventory: dict[str, int]) -> dict[str, int]:
+    return {
+        str(item_id): inventory.get(str(item_id), 0)
+        for item_id in (*SECRET_BOOK_IDS, *EXP_ORB_IDS)
+    }
 
 
 def _inventory(v) -> dict[str, int]:
@@ -3338,7 +3371,7 @@ def _inventory(v) -> dict[str, int]:
     return out
 
 
-def on_items(job: FarmJob, c: Client, result: dict):
+def on_items(job: FarmJob, c: Client, result: dict) -> bool:
     """gameEnd の後に呼ぶ。応答の ywp_user_item（持ち物全部）と前回の差で、手に入れた分を数える
 
     ywp_user_item はログイン時と同じ全件が返る（2026-09-27 実機で一致を確認）ので、
@@ -3346,7 +3379,7 @@ def on_items(job: FarmJob, c: Client, result: dict):
     """
     now = result.get('ywp_user_item') if isinstance(result, dict) else None
     if now is None:
-        return
+        return False
     now = _inventory(now)
     # Yポイントはアイテム（80102。0個だと行が無い）。毎戦ここで最新にする
     # （ひとだま・Yマネーは sync_hitodama が同じ gameEnd の ywp_user_data から拾う）
@@ -3355,11 +3388,18 @@ def on_items(job: FarmJob, c: Client, result: dict):
     job.points_done = job.done
     if job.item_prev is None:
         job.item_prev = _inventory(c.save.get('ywp_user_item'))
+    previous_tracked = tracked_inventory(job.current_items or job.item_prev)
+    current_tracked = tracked_inventory(now)
+    inventory_changed = current_tracked != previous_tracked
     for k, n in now.items():
         gain = n - job.item_prev.get(k, 0)
         if gain > 0:
             job.item_counts[k] += gain
     job.item_prev = now
+    if inventory_changed:
+        job.current_items = current_tracked
+        job.inventory_version += 1
+    return inventory_changed
 
 
 def items_text(job: FarmJob) -> str:
@@ -4031,8 +4071,8 @@ async def _run_job(job: FarmJob, email: str, password: str,
             set_food_policy(job, c)
             saved_items = c.save.get('ywp_user_item')
             job.item_prev = _inventory(saved_items)
-            if job.start_items is None and saved_items is not None:
-                job.start_items = dict(job.item_prev)
+            if saved_items is not None:
+                job.current_items = tracked_inventory(job.item_prev)
             await push_progress(job)
             # 開き損ねたメニュー（ショップ等）があれば周回の前に開け直す
             await maybe_unlock_menus(job, c)
@@ -4274,7 +4314,8 @@ async def _run_job(job: FarmJob, email: str, password: str,
                     job.success += 1
                     job.event_point += int(result.get('eventPoint') or 0)
                     job.status = '⚔ 周回中'
-                    on_items(job, c, result)
+                    if on_items(job, c, result):
+                        schedule_inventory_progress(job)
                     on_food(job, c, result)
                     track_deck(job, c, js, result)
                     await on_befriend(job, c, js, result)
@@ -4393,6 +4434,9 @@ async def _run_job(job: FarmJob, email: str, password: str,
 
 async def finish_job(job: FarmJob):
     """進捗メッセージを結果に差し替え、完了をDM通知する"""
+    pending_update = job.inventory_update_task
+    if pending_update is not None and not pending_update.done():
+        pending_update.cancel()
     if job.interrupted:
         # Botの再起動で止まっただけ。結果にはせず、起動後の復元を待つ
         job.status = '♻ Botの再起動で中断（起動後に自動で続きから再開します）'
