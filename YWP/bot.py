@@ -2518,6 +2518,7 @@ class FarmJob:
         # 所持数。セーブはログイン時にしか降ってこないので、節目ごとに取り直す
         self.start_points: dict[str, int] = {}
         self.now_points: dict[str, int] = {}
+        self.start_items: dict[str, int] | None = None
         self.points_at = 0.0          # now_points を取った時刻
         self.points_done = 0          # now_points を取った時点の周回数
         self.refreshes = 0
@@ -2941,6 +2942,11 @@ def progress_embed(job: FarmJob) -> discord.Embed:
     e.add_field(name='🎪 イベントP', value=f'{job.event_point:,}', inline=True)
     e.add_field(name='⏳ 完了予定',
                 value='—（一時停止中）' if job.is_paused else eta_text(job), inline=True)
+    if job.start_items is not None:
+        e.add_field(name='📘 秘伝書（開始時）',
+                    value=inventory_group_text(job.start_items, SECRET_BOOK_IDS), inline=False)
+        e.add_field(name='🟠 経験値玉（開始時）',
+                    value=inventory_group_text(job.start_items, EXP_ORB_IDS), inline=False)
     if job.paused_seconds >= 1:
         e.add_field(name='⏸ 一時停止',
                     value=f'{job.pauses}回 / 計 {fmt_sec(job.paused_seconds)}', inline=True)
@@ -3123,6 +3129,7 @@ _JOB_KEYS = ('jid', 'stage_id', 'stage_ids', 'preset_name', 'count', 'battle_tim
              'done', 'success', 'fail', 'stage_pos', 'event_point', 'hitodama_buys',
              'befriends', 'leader_sets', 'last_leader', 'deck_sorts', 'pauses', 'refreshes',
              'player_name', 'start_points', 'deck_levels_start',
+             'start_items',
              'auto_levelup', 'level_unlocks', 'level_unlock_ymoney',
              'mission_receipts', 'mission_ymoney', 'present_receipts', 'food_fed', 'food_won', 'food_bought',
              'food_spent', 'gacha_youkai', 'food_mode', 'grind_stage', 'grind_left',
@@ -3305,6 +3312,19 @@ def item_label(item_id) -> str:
         except OSError as e:
             print(f'[item] アイテムマスタを読めません（IDで表示します）: {e}')
     return _ITEM_NAMES.get(str(item_id)) or f'`{item_id}`'
+
+
+SECRET_BOOK_IDS = (29002, 29003, 20703, 29001, 29004, 29100, 28001)
+EXP_ORB_IDS = (20506, 20501, 20502, 20503, 20504, 20505, 20508, 20509)
+
+
+def inventory_group_text(inventory: dict, item_ids: tuple[int, ...]) -> str:
+    items = [
+        f'{item_label(item_id)} × {count:,}'
+        for item_id in item_ids
+        if (count := inventory.get(str(item_id), inventory.get(item_id, 0))) > 0
+    ]
+    return ' / '.join(items) if items else 'なし'
 
 
 def _inventory(v) -> dict[str, int]:
@@ -4009,7 +4029,11 @@ async def _run_job(job: FarmJob, email: str, password: str,
             except (ValueError, AttributeError):
                 pass
             set_food_policy(job, c)
-            job.item_prev = _inventory(c.save.get('ywp_user_item'))
+            saved_items = c.save.get('ywp_user_item')
+            job.item_prev = _inventory(saved_items)
+            if job.start_items is None and saved_items is not None:
+                job.start_items = dict(job.item_prev)
+            await push_progress(job)
             # 開き損ねたメニュー（ショップ等）があれば周回の前に開け直す
             await maybe_unlock_menus(job, c)
             if job.drop_asked and not job.auto_deck:
