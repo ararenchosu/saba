@@ -2467,8 +2467,9 @@ class FarmJob:
         self.fail = 0
         self.event_point = 0
         self.hitodama_buys = 0      # ひとだま自動購入を実行した回数
-        # ドロップと自動編成（AUTO_DECK_STAGE を単独で周回するときだけ聞く）
-        self.drop_asked = False     # 聞いたか（聞いて無効なら、この面では友だち申告もしない）
+        # ドロップと自動育成
+        self.drop_asked = False     # 旧ジョブ状態との互換用
+        self.drop_enabled = True
         self.auto_deck = False
         self.befriends = 0          # 仲間になった回数（どのジョブでも数える）
         self.befriend_counts: collections.Counter = collections.Counter()   # 妖怪ID→回数
@@ -2487,8 +2488,10 @@ class FarmJob:
         self.grind_for: int | None = None       # この面が硬かったので下がった
         self.grind_home: int | None = None      # 単独周回で、終わったら戻る面
         self.grind_battles = 0                  # 育成に使った戦数（周回数に数えない）
-        # レベル上限の自動解放（周回開始時に聞く）とミッション報酬の自動受け取り
+        # 自動育成時はLv50まで上限を自動解放する
         self.auto_levelup = False
+        self.auto_training = False
+        self.rank_training_targets: list[str] = []
         self.level_unlocks = 0
         self.level_unlock_ymoney = 0
         self.level_open_skip: set = set()       # 解放しないと決めた (妖怪ID, レベル)
@@ -2957,8 +2960,8 @@ def progress_embed(job: FarmJob) -> discord.Embed:
         e.add_field(name='🧩 編成（レベル・開始からの上がり幅）', value=deck_text(job)
                     + (f'\n強い順に組み直した {job.deck_sorts}回' if job.deck_sorts else ''),
                     inline=False)
-    if job.auto_levelup or job.level_unlocks:
-        e.add_field(name='📈 レベル上限の自動解放',
+    if job.auto_training or job.level_unlocks:
+        e.add_field(name='📈 自動育成・レベル上限解放',
                     value=(f'{job.level_unlocks}回（Yマネー -{job.level_unlock_ymoney:,}）'
                            if job.level_unlocks else 'まだありません'), inline=True)
     if job.food_fed or job.food_bought or (job.auto_deck and job.food_mode != 'off'):
@@ -3018,8 +3021,8 @@ def result_embed(job: FarmJob, aborted: bool = False) -> discord.Embed:
         e.add_field(name='🧩 編成（レベル・開始からの上がり幅）', value=deck_text(job)
                     + (f'\n強い順に組み直した {job.deck_sorts}回' if job.deck_sorts else ''),
                     inline=False)
-    if job.auto_levelup or job.level_unlocks:
-        e.add_field(name='📈 レベル上限の自動解放',
+    if job.auto_training or job.level_unlocks:
+        e.add_field(name='📈 自動育成・レベル上限解放',
                     value=(f'{job.level_unlocks}回（Yマネー -{job.level_unlock_ymoney:,}）'
                            if job.level_unlocks else 'まだありません'), inline=True)
     if job.food_fed or job.food_bought or (job.auto_deck and job.food_mode != 'off'):
@@ -3149,12 +3152,13 @@ def resume_job(job: FarmJob) -> bool:
 
 JOBS_STATE_FILE = os.path.join(BASE_DIR, 'jobs_state.json')
 _JOB_KEYS = ('jid', 'stage_id', 'stage_ids', 'preset_name', 'count', 'battle_time',
-             'cooldown', 'target_key', 'target_value', 'drop_asked', 'auto_deck',
+             'cooldown', 'target_key', 'target_value', 'drop_asked', 'drop_enabled', 'auto_deck',
              'done', 'success', 'fail', 'stage_pos', 'event_point', 'hitodama_buys',
              'befriends', 'leader_sets', 'last_leader', 'deck_sorts', 'pauses', 'refreshes',
              'player_name', 'start_points', 'deck_levels_start',
              'current_items',
-             'auto_levelup', 'level_unlocks', 'level_unlock_ymoney',
+             'auto_levelup', 'auto_training', 'level_unlocks', 'level_unlock_ymoney',
+             'rank_training_targets',
              'mission_receipts', 'mission_ymoney', 'present_receipts', 'food_fed', 'food_won', 'food_bought',
              'food_spent', 'gacha_youkai', 'food_mode', 'grind_stage', 'grind_left',
              'grind_for', 'grind_home', 'grind_battles')
@@ -3217,6 +3221,12 @@ async def restore_jobs():
         for k in _JOB_KEYS:
             if k in st:
                 setattr(job, k, st[k])
+        if 'drop_enabled' not in st:
+            job.drop_enabled = not bool(st.get('drop_asked')) or bool(st.get('auto_deck'))
+        if 'auto_training' not in st:
+            job.auto_training = bool(st.get('auto_levelup'))
+        if 'rank_training_targets' not in st:
+            job.rank_training_targets = []
         if 'current_items' not in st:
             job.current_items = st.get('start_items')
         job.target_delta = None                     # 増加量指定は開始時に絶対値へ確定済み
@@ -3449,6 +3459,88 @@ def track_deck(job: FarmJob, c: Client, start: dict | None = None,
     for y in job.deck_order:
         if y in job.deck_levels:
             job.deck_levels_start.setdefault(y, job.deck_levels[y])
+
+
+TRAIN_RANK_MIN = 11  # ZZZ
+TRAIN_LEVEL_MAX = 50
+
+
+def rank_training_candidates(c: Client) -> list[str]:
+    """所持妖怪から、ZZZ以上かつLv50未満の育成候補を返す"""
+    levels = _levels(c.save.get('ywp_user_youkai'))
+    candidates = []
+    try:
+        for youkai_id, level in levels.items():
+            if level >= TRAIN_LEVEL_MAX:
+                continue
+            rank = c.youkai_rank(youkai_id)
+            if rank is not None and rank >= TRAIN_RANK_MIN:
+                candidates.append(youkai_id)
+    except Exception as e:
+        log_line(f'ZZZ育成候補のランク取得に失敗（通常の周回は続ける）: {str(e)[:150]}')
+        return []
+    return candidates
+
+
+def rank_training_deck(c: Client, targets: list[str], candidates: list[str]) -> list[str]:
+    """育成対象を優先し、現在の編成・強い妖怪で5枠を埋める"""
+    current, _ = c.current_deck()
+    strongest = c.strongest_deck()
+    support = [
+        youkai_id for youkai_id in (*current, *strongest)
+        if youkai_id not in candidates
+    ]
+    return list(dict.fromkeys([*targets, *support]))[:5]
+
+
+async def manage_rank_training_deck(job: FarmJob, c: Client, initialize: bool = False) -> bool:
+    """ZZZ以上の育成対象を編成し、Lv50到達枠を次の候補へ交代する"""
+    candidates = rank_training_candidates(c)
+    levels = _levels(c.save.get('ywp_user_youkai'))
+    current, _ = c.current_deck()
+    current_set = set(current)
+    completed = {
+        youkai_id for youkai_id in job.rank_training_targets
+        if levels.get(youkai_id, 0) >= TRAIN_LEVEL_MAX
+    }
+
+    active = [
+        youkai_id for youkai_id in job.rank_training_targets
+        if youkai_id not in completed and youkai_id in candidates
+    ]
+    if initialize or not job.rank_training_targets:
+        active = random.sample(candidates, min(5, len(candidates)))
+
+    available = [
+        youkai_id for youkai_id in candidates
+        if youkai_id not in active and youkai_id not in current_set
+    ]
+    for _ in completed:
+        if available and len(active) < 5:
+            chosen = random.choice(available)
+            available.remove(chosen)
+            active.append(chosen)
+
+    deck = rank_training_deck(c, active, candidates)
+    changed = deck != current
+    if changed:
+        try:
+            code = await asyncio.to_thread(c.deck_edit, deck)
+        except Exception as e:
+            log_line(f'ZZZ育成編成に失敗（周回は続ける）: {str(e)[:150]}')
+            return False
+        if code != 0:
+            log_line(f'ZZZ育成編成に失敗 deckEdit rc={code}（デッキは変わっていない）')
+            return False
+        job.deck_order = list(deck)
+        log_line(f'ZZZ育成編成: {current} → {deck}')
+
+    job.rank_training_targets = active
+    job.deck_levels.update(levels)
+    for youkai_id in job.deck_order:
+        if youkai_id in job.deck_levels:
+            job.deck_levels_start.setdefault(youkai_id, job.deck_levels[youkai_id])
+    return changed
 
 
 def deck_text(job: FarmJob) -> str:
@@ -4076,10 +4168,16 @@ async def _run_job(job: FarmJob, email: str, password: str,
             await push_progress(job)
             # 開き損ねたメニュー（ショップ等）があれば周回の前に開け直す
             await maybe_unlock_menus(job, c)
-            if job.drop_asked and not job.auto_deck:
-                # 「ドロップと自動編成」を無効で始めた。この面では友だち申告もしない
+            if not job.drop_enabled:
+                # ドロップを無効にした場合、この面では友だち申告もしない
                 c.befriend_off.add(job.stage_id)
             await sort_deck_now(job, c, '周回開始')
+            if job.auto_training:
+                await manage_rank_training_deck(
+                    job,
+                    c,
+                    initialize=not job.resumed or not job.rank_training_targets,
+                )
             track_deck(job, c)
             # ミッション報酬を受け取り、上限で止まっている編成の妖怪を解放してから回す
             await receive_missions_now(job, c)
@@ -4321,6 +4419,9 @@ async def _run_job(job: FarmJob, email: str, password: str,
                     await on_befriend(job, c, js, result)
                     if job.auto_levelup:
                         await on_level(job, c, result)
+                    if job.auto_training:
+                        if await manage_rank_training_deck(job, c):
+                            await update_progress(job, force=True)
                     if time.time() - job.last_mission_at >= MISSION_EVERY:
                         await receive_missions_now(job, c)
                     if job.stage_id == GACHA_STAGE and first_clear(result):
@@ -4524,36 +4625,6 @@ class YesNoView(discord.ui.View):
         try:
             await interaction.response.edit_message(
                 content=self.yes_text if on else self.no_text, view=None)
-        except discord.HTTPException:
-            pass
-        self.stop()
-
-    @discord.ui.button(label='有効にする', emoji='✅', style=discord.ButtonStyle.success)
-    async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._answer(interaction, True)
-
-    @discord.ui.button(label='無効にする', emoji='✖', style=discord.ButtonStyle.secondary)
-    async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._answer(interaction, False)
-
-
-class DropDeckConfirmView(discord.ui.View):
-    """AUTO_DECK_STAGE を周回するときの「ドロップと自動編成を有効にしますか？」"""
-
-    def __init__(self, owner_id: int):
-        super().__init__(timeout=AUTO_DECK_ASK_TIMEOUT)
-        self.owner_id = owner_id
-        self.choice: bool | None = None
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.owner_id
-
-    async def _answer(self, interaction: discord.Interaction, on: bool):
-        self.choice = on
-        text = ('✅ ドロップと自動編成を**有効**にして開始します' if on
-                else '✖ ドロップと自動編成は**無効**で開始します')
-        try:
-            await interaction.response.edit_message(content=text, view=None)
         except discord.HTTPException:
             pass
         self.stop()
@@ -5010,49 +5081,30 @@ class FarmModal(discord.ui.Modal, title='ぷにぷに 自動周回'):
             password = self.password_label.component.value
             save_name = save_hint
 
-        # Yマネー / Yポイント / ドロップアイテムの取得を常時有効にする。
-        # 自動編成だけは特定の対象ステージでだけ有効にする（その場で聞く）。
-        drop_asked = True
-        auto_deck = False
-        if not stage_ids and stage_id == AUTO_DECK_STAGE:
-            ask = DropDeckConfirmView(interaction.user.id)
-            await interaction.followup.send(
-                f'🤝 ステージ `{stage_id}` を周回します。\n'
-                '**ドロップと自動編成を有効にしますか？**\n'
-                '有効にすると、妖怪が仲間になったらその妖怪をリーダーにします'
-                '（すでにデッキにいる場合はそのまま）。\n'
-                f'{AUTO_DECK_ASK_TIMEOUT}秒以内に選ばないと無効のまま開始します。',
-                view=ask, ephemeral=True)
-            await ask.wait()
-            auto_deck = bool(ask.choice)
-            drop_asked = True
-
-        # 自動編成を有効にしたときだけ、好物の使い方を聞く
-        food_mode = 'off'
-        if auto_deck:
-            ask_food = FoodModeView(interaction.user.id)
-            await interaction.followup.send(
-                '🍙 **好物を使いますか？**\n'
-                '好物をあげれば仲間になるバトルだけあげます（ランクは当たるうち一番安いもの）。'
-                '好物は買えるランクごとに3個ずつ買い置きします（Yマネーは10,000以上残します）。\n'
-                '・**まだ持っていない妖怪だけ** … すでに仲間にしている妖怪にはあげない\n'
-                '・**持っていても使う** … 重ねて仲間にすると必殺技Lvが上がる\n'
-                f'{AUTO_DECK_ASK_TIMEOUT}秒以内に選ばないと「使わない」で開始します。',
-                view=ask_food, ephemeral=True)
-            await ask_food.wait()
-            food_mode = ask_food.choice or 'off'
-
-        # 編成の妖怪のレベル上限を自動で解放するか（どの周回でも聞く）
-        ask_lv = YesNoView(interaction.user.id,
-                           '✅ レベル上限の自動解放を**有効**にして開始します',
-                           '✖ レベル上限の自動解放は**無効**で開始します')
+        # ドロップと自動育成は、ステージやプリセットに関係なく別々に確認する
+        ask_drop = YesNoView(interaction.user.id,
+                             '✅ ドロップを**有効**にして開始します',
+                             '✖ ドロップを**無効**にして開始します')
         await interaction.followup.send(
-            '📈 **編成の妖怪のレベル上限を自動で解放しますか？**\n'
-            f'Lv10・20・30・40 の上限で止まったら Yマネーで解放して、Lv{LEVEL_OPEN_MAX} まで上げます'
-            f'（Lv{LEVEL_OPEN_MAX} から先は Yポイントが要るので解放しません）。\n'
-            f'{AUTO_DECK_ASK_TIMEOUT}秒以内に選ばないと無効のまま開始します。',
-            view=ask_lv, ephemeral=True)
-        await ask_lv.wait()
+            '**ドロップを有効にしますか？**\n'
+            '無効にすると、この周回では妖怪の仲間申告を行いません。\n'
+            f'{AUTO_DECK_ASK_TIMEOUT}秒以内に選ばない場合は無効で開始します。',
+            view=ask_drop, ephemeral=True)
+        await ask_drop.wait()
+        drop_enabled = bool(ask_drop.choice)
+
+        ask_training = YesNoView(interaction.user.id,
+                                 '✅ 自動育成を**有効**にして開始します',
+                                 '✖ 自動育成を**無効**にして開始します')
+        await interaction.followup.send(
+            '📈 **自動育成を有効にしますか？**\n'
+            '有効にすると、所持しているZZZ以上・Lv50未満の妖怪を最大5体選び、'
+            f'Lv{LEVEL_OPEN_MAX}までYマネーで上限解放して育成します。'
+            'Lv50到達後は次の候補に交代します。\n'
+            f'{AUTO_DECK_ASK_TIMEOUT}秒以内に選ばない場合は無効で開始します。',
+            view=ask_training, ephemeral=True)
+        await ask_training.wait()
+        auto_training = bool(ask_training.choice)
 
         # まだ育っていない垢なら、安全な速さで回すか、育っている垢として速く回すかを聞く
         uid = save_hint if (save_hint or '').isdigit() else None
@@ -5078,9 +5130,12 @@ class FarmModal(discord.ui.Modal, title='ぷにぷに 自動周回'):
         job = FarmJob(interaction.user, stage_id, count, battle_time, cooldown,
                       target_key=tkey, target_value=tvalue, target_delta=tdelta,
                       stage_ids=stage_ids, preset_name=preset_name)
-        job.drop_asked, job.auto_deck = drop_asked, auto_deck
-        job.food_mode = food_mode
-        job.auto_levelup = bool(ask_lv.choice)
+        job.drop_asked = True
+        job.drop_enabled = drop_enabled
+        job.auto_deck = False
+        job.food_mode = 'off'
+        job.auto_training = auto_training
+        job.auto_levelup = auto_training
         job.resume_email = email        # 再起動後に続きから回すため（パスワードは持たない）
         add_job(job)
         self._job = job
@@ -5110,10 +5165,12 @@ class FarmModal(discord.ui.Modal, title='ぷにぷに 自動周回'):
             'target_delta': tdelta,
             'battle_time': battle_time,
             'cooldown': cooldown,
-            'drop_asked': drop_asked,
-            'auto_deck': auto_deck,
-            'food_mode': food_mode,
-            'auto_levelup': bool(ask_lv.choice),
+            'drop_asked': True,
+            'drop_enabled': drop_enabled,
+            'auto_deck': False,
+            'food_mode': 'off',
+            'auto_levelup': auto_training,
+            'auto_training': auto_training,
         })
 
         avg_b = 1.0 + BATTLE_TIME_SPREAD / 2   # jitter の期待値倍率（バトル）
@@ -6273,6 +6330,11 @@ def _validate_last_farm_profile(profile: dict) -> tuple[dict | None, str | None]
     normalized['target_delta'] = target_delta
     normalized['battle_time'] = max(battle_time, BATTLE_TIME_MIN)
     normalized['cooldown'] = max(cooldown, COOLDOWN_MIN)
+    if 'drop_enabled' not in normalized:
+        normalized['drop_enabled'] = (
+            not bool(profile.get('drop_asked')) or bool(profile.get('auto_deck')))
+    normalized['auto_training'] = bool(
+        profile.get('auto_training', profile.get('auto_levelup', False)))
     return normalized, None
 
 
@@ -6303,10 +6365,8 @@ def _last_farm_preview_embed(profile: dict) -> discord.Embed:
     e.add_field(name='周回内容', value=f'{stage_text}\n回数: **{count_text}**\n目標: **{target_summary}**', inline=False)
     e.add_field(name='時間', value=(f'戦闘 {profile.get("battle_time")}秒 / クールダウン {profile.get("cooldown")}秒'), inline=False)
     e.add_field(name='追加設定', value=(
-        f'ドロップ: **{"ON" if profile.get("drop_asked") else "OFF"}** / '
-        f'自動編成: **{"ON" if profile.get("auto_deck") else "OFF"}** / '
-        f'好物: **{profile.get("food_mode", "off")}** / '
-        f'Lv自動解放: **{"ON" if profile.get("auto_levelup") else "OFF"}**'), inline=False)
+        f'ドロップ: **{"ON" if profile.get("drop_enabled") else "OFF"}** / '
+        f'自動育成: **{"ON" if profile.get("auto_training") else "OFF"}**'), inline=False)
     return e
 
 
@@ -6325,15 +6385,13 @@ class FarmRepeatEditModal(discord.ui.Modal, title='周回条件の変更'):
             'target_delta': '追加目標値',
             'battle_time': '戦闘時間（秒）',
             'cooldown': 'クールダウン（秒）',
-            'drop_asked': 'ドロップ（true/false）',
-            'auto_deck': '自動編成（true/false）',
-            'food_mode': '好物モード（off/new/all）',
-            'auto_levelup': 'レベル上限自動解放（true/false）',
+            'drop_enabled': 'ドロップ（true/false）',
+            'auto_training': '自動育成（true/false）',
         }
         default = profile.get(key)
         if default is None:
             default = ''
-        elif key in {'drop_asked', 'auto_deck', 'auto_levelup'}:
+        elif key in {'drop_enabled', 'auto_training'}:
             default = 'true' if bool(default) else 'false'
         elif key in {'food_mode'}:
             default = str(default)
@@ -6367,9 +6425,11 @@ class FarmRepeatEditModal(discord.ui.Modal, title='周回条件の変更'):
                 if not math.isfinite(val) or val <= 0:
                     raise ValueError
                 self.profile[key] = val
-            elif key in {'drop_asked', 'auto_deck', 'auto_levelup'}:
+            elif key in {'drop_enabled', 'auto_training'}:
                 val = raw.lower() in ('1', 'true', 'yes', 'on', 'y')
                 self.profile[key] = val
+                if key == 'auto_training':
+                    self.profile['auto_levelup'] = val
             elif key == 'target_key':
                 if raw in ('', 'none', 'null', 'なし'):
                     self.profile[key] = None
@@ -6414,10 +6474,8 @@ class FarmRepeatEditSelectView(discord.ui.View):
                 discord.SelectOption(label='目標値', value='target_value'),
                 discord.SelectOption(label='戦闘時間', value='battle_time'),
                 discord.SelectOption(label='クールダウン', value='cooldown'),
-                discord.SelectOption(label='ドロップ', value='drop_asked'),
-                discord.SelectOption(label='自動編成', value='auto_deck'),
-                discord.SelectOption(label='好物', value='food_mode'),
-                discord.SelectOption(label='自動解放', value='auto_levelup'),
+                discord.SelectOption(label='ドロップ', value='drop_enabled'),
+                discord.SelectOption(label='自動育成', value='auto_training'),
             ],
         )
         select.callback = self._picked
@@ -6508,10 +6566,12 @@ async def _start_last_farm(interaction: discord.Interaction, profile: dict):
         target_key=target_key, target_value=target_value,
         target_delta=target_delta, stage_ids=stage_ids,
         preset_name=profile.get('preset_name'))
-    job.drop_asked = bool(profile.get('drop_asked'))
+    job.drop_asked = True
+    job.drop_enabled = bool(profile.get('drop_enabled'))
     job.auto_deck = bool(profile.get('auto_deck'))
     job.food_mode = profile.get('food_mode', 'off')
-    job.auto_levelup = bool(profile.get('auto_levelup'))
+    job.auto_training = bool(profile.get('auto_training'))
+    job.auto_levelup = job.auto_training
     job.resume_email = email
     job.save_uid = save_uid
     job.player_name = profile.get('save_name')
