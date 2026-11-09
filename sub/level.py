@@ -6,6 +6,8 @@ sub/level.py — レベル / XP システム（サブBOT高機能）
 - レベルアップ時に通知＆設定された報酬ロールを付与
 - /rank … 自分 or 指定ユーザーのランク表示
 - /leaderboard … サーバーのXPランキング
+- ON/OFF は /settings → 高度な設定 の「レベル/XP」トグル、または /leveltoggle コマンド（xp_enabled）。
+  オフの間は XP加算・レベルアップ通知・報酬ロールが止まり、/rank・/leaderboard もオフ案内になる（データは消えない）。
 """
 
 import time
@@ -13,10 +15,15 @@ import time
 import discord
 from discord import app_commands
 
-from sub.core import bot, store, get_or_create_role, is_home
+from sub.core import bot, store, get_or_create_role, is_home, requires
 from sub.userdata import users
 
 XP_COOLDOWN = 60
+
+
+def _enabled(interaction) -> bool:
+    """レベル/XP機能がオンか（/settings → 高度な設定 の「レベル/XP」トグル）"""
+    return store.cfg(interaction.guild.id).get("xp_enabled", True)
 
 
 def xp_for_level(level: int) -> int:
@@ -85,6 +92,9 @@ async def xp_on_message(message: discord.Message):
 @bot.tree.command(name="rank", description="レベルとXPを表示する")
 @app_commands.describe(user="見たい人（省略で自分）")
 async def cmd_rank(interaction: discord.Interaction, user: discord.Member = None):
+    if not _enabled(interaction):
+        await interaction.response.send_message("レベル/XP機能は今オフだよ。（オンにするには /settings → 高度な設定 →「レベル/XP」）", ephemeral=True)
+        return
     target = user or interaction.user
     u = users.get(interaction.guild.id, target.id)
     lvl, cur, need = progress(u["xp"])
@@ -102,6 +112,9 @@ async def cmd_rank(interaction: discord.Interaction, user: discord.Member = None
 
 @bot.tree.command(name="leaderboard", description="XPランキング（上位10人）を表示する")
 async def cmd_leaderboard(interaction: discord.Interaction):
+    if not _enabled(interaction):
+        await interaction.response.send_message("レベル/XP機能は今オフだよ。（オンにするには /settings → 高度な設定 →「レベル/XP」）", ephemeral=True)
+        return
     all_users = users.guild_users(interaction.guild.id)
     ranking = sorted(all_users.items(), key=lambda kv: kv[1].get("xp", 0), reverse=True)[:10]
     if not ranking:
@@ -116,3 +129,23 @@ async def cmd_leaderboard(interaction: discord.Interaction):
         lines.append(f"{mark} **{name}** — Lv.{level_from_xp(data.get('xp', 0))}（{data.get('xp', 0)} XP）")
     embed = discord.Embed(title="🏆 XPランキング", description="\n".join(lines), color=discord.Color.gold())
     await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="leveltoggle", description="レベル/XP機能をオン・オフする（管理者用）")
+@requires(administrator=True)
+@app_commands.describe(mode="オンかオフか")
+@app_commands.choices(mode=[
+    app_commands.Choice(name="オン", value="on"),
+    app_commands.Choice(name="オフ", value="off"),
+])
+async def cmd_leveltoggle(interaction: discord.Interaction, mode: app_commands.Choice[str]):
+    cfg = store.cfg(interaction.guild.id)
+    new_state = mode.value == "on"
+    was = bool(cfg.get("xp_enabled", True))
+    cfg["xp_enabled"] = new_state
+    store.save_config()
+    if new_state:
+        msg = "🎚️ レベル/XP機能はすでにオンだよ。" if was else "🎚️ レベル/XP機能を **オン** にしたよ。発言でXPが貯まって、/rank や /leaderboard も使えるよ。"
+    else:
+        msg = "🎚️ レベル/XP機能はすでにオフだよ。" if not was else "🎚️ レベル/XP機能を **オフ** にしたよ。XPは貯まらず、/rank や /leaderboard はオフ案内になるよ（データは消えない）。"
+    await interaction.response.send_message(msg, ephemeral=True)
