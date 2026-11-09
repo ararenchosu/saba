@@ -12,8 +12,8 @@ from sub.core import bot
 
 CATEGORIES = [
     ("🌟 一般コマンド", ["rank", "leaderboard", "balance", "daily", "pay", "coinrank", "poll", "giveaway", "remind", "userinfo", "serverinfo", "avatar"]),
-    ("🛠️ 管理者セットアップ", ["setup_rules", "setup_roles", "setup_recruit", "setup_intro", "setup_tickets", "setup_gate", "settings", "setwelcome", "setlog", "setintro"]),
-    ("🛡️ モデレーション（管理系）", ["warn", "warns", "clearwarns", "timeout", "untimeout", "kick", "ban", "unban", "purge"]),
+    ("🛠️ 管理者セットアップ", ["setup_rules", "setup_roles", "setup_recruit", "setup_intro", "setup_tickets", "setup_gate", "settings", "setwelcome", "setlog", "setintro", "leveltoggle"]),
+    ("🛡️ モデレーション（管理系）", ["warn", "warns", "clearwarns", "timeout", "untimeout", "kick", "ban", "unban", "purge", "export"]),
 ]
 
 
