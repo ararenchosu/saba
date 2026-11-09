@@ -220,7 +220,7 @@ STRONG_DECK_KEEP_COUNT = 3
 # （育った垢になったら）速く戻る（start_grind）
 GRIND_BACK = 2
 TRUST_BATTLES = ywp_auto.TRUST_BATTLES        # この勝ち数で「育った垢」（速さの制限なし）
-# 好物の使い方（周回ごとに選ぶ。job.food_mode）
+# 好物の使い方（妖怪ドロップと合わせて選ぶ。job.food_mode）
 FOOD_MODES = {'off': '使わない', 'new': 'まだ持っていない妖怪だけ', 'all': '持っていても使う（必殺技Lv上げ）'}
 # ガチャ: この面を初めてクリアしたときに、持っているコインを全部使って引く
 GACHA_STAGE = 1001015
@@ -2481,7 +2481,7 @@ class FarmJob:
         self.food_bought = 0
         self.food_spent = 0
         self.gacha_youkai: list = []            # ガチャで出た妖怪ID（引いた順）
-        self.food_mode = 'off'      # 自動編成の面で好物を使うか（FOOD_MODES。開始時に聞く）
+        self.food_mode = 'off'      # ドロップと連動する好物設定（FOOD_MODES）
         # 硬い面の手前で垢を育てる（start_grind）
         self.grind_stage: int | None = None     # 育成中に回している面
         self.grind_left = 0                     # 育った垢まであと何勝
@@ -2491,6 +2491,7 @@ class FarmJob:
         # 自動育成時はLv50まで上限を自動解放する
         self.auto_levelup = False
         self.auto_training = False
+        self.client = None
         self.rank_training_targets: list[str] = []
         self.level_unlocks = 0
         self.level_unlock_ymoney = 0
@@ -2964,8 +2965,7 @@ def progress_embed(job: FarmJob) -> discord.Embed:
         e.add_field(name='📈 自動育成・レベル上限解放',
                     value=(f'{job.level_unlocks}回（Yマネー -{job.level_unlock_ymoney:,}）'
                            if job.level_unlocks else 'まだありません'), inline=True)
-    if job.food_fed or job.food_bought or (job.auto_deck and job.food_mode != 'off'):
-        e.add_field(name='🍙 好物', value=food_text(job), inline=True)
+    e.add_field(name='🤝 妖怪ドロップ・好物', value=food_text(job), inline=True)
     if job.gacha_youkai:
         e.add_field(name='🎰 ガチャ', value=gacha_text(job), inline=False)
     if job.current_items is not None:
@@ -3025,8 +3025,7 @@ def result_embed(job: FarmJob, aborted: bool = False) -> discord.Embed:
         e.add_field(name='📈 自動育成・レベル上限解放',
                     value=(f'{job.level_unlocks}回（Yマネー -{job.level_unlock_ymoney:,}）'
                            if job.level_unlocks else 'まだありません'), inline=True)
-    if job.food_fed or job.food_bought or (job.auto_deck and job.food_mode != 'off'):
-        e.add_field(name='🍙 好物', value=food_text(job), inline=True)
+    e.add_field(name='🤝 妖怪ドロップ・好物', value=food_text(job), inline=True)
     if job.gacha_youkai:
         e.add_field(name='🎰 ガチャ', value=gacha_text(job), inline=False)
     if job.mission_receipts:
@@ -3661,11 +3660,13 @@ def closed_menu_stages(c: Client) -> set[int]:
 def set_food_policy(job: FarmJob, c: Client):
     """好物を使う面と使い方を Client に教える。判定はバトルのたびに最新のメニューで行う
 
-    ・自動編成の面: 周回開始時に選んだ job.food_mode（'new' / 'all'。'off' なら使わない）
+    ・周回面: job.food_mode（'new' / 'all'。'off' なら使わない）
     ・まだ開いていないメニューの面: 開くために、まだ持っていない妖怪にだけ使う（'new'）
     """
     def policy(stage_id):
-        if job.auto_deck and stage_id == job.stage_id and job.food_mode in ('new', 'all'):
+        if not job.drop_enabled:
+            return None
+        if stage_id == job.stage_id and job.food_mode in ('new', 'all'):
             return job.food_mode
         return 'new' if stage_id in closed_menu_stages(c) else None
     c.food_policy = policy
@@ -3690,8 +3691,9 @@ def on_food(job: FarmJob, c: Client, result: dict | None):
 
 
 def food_text(job: FarmJob) -> str:
-    text = (f'設定：{FOOD_MODES.get(job.food_mode, job.food_mode)}\n' if job.auto_deck else '')
-    text += f'あげた {job.food_fed}回（仲間になった {job.food_won}回）'
+    text = (f'ドロップ・好物：{"有効" if job.drop_enabled else "無効"}'
+            f'（{FOOD_MODES.get(job.food_mode, job.food_mode)}）\n'
+            f'あげた {job.food_fed}回（仲間になった {job.food_won}回）')
     if job.food_bought:
         text += f'\n買った {job.food_bought}個（Yマネー -{job.food_spent:,}）'
     return text
@@ -4152,6 +4154,7 @@ async def _run_job(job: FarmJob, email: str, password: str,
                 job.last_error = f'ログイン失敗: {str(e)[:300]}'
                 return
             remember_maps(c.save)
+            job.client = c
             job.save_uid = c.userId
             if job.resumed:
                 # 復元したジョブは、止まる前までの稼働時間を引き継ぐ
@@ -4169,9 +4172,6 @@ async def _run_job(job: FarmJob, email: str, password: str,
             await push_progress(job)
             # 開き損ねたメニュー（ショップ等）があれば周回の前に開け直す
             await maybe_unlock_menus(job, c)
-            if not job.drop_enabled:
-                # ドロップを無効にした場合、この面では友だち申告もしない
-                c.befriend_off.add(job.stage_id)
             await sort_deck_now(job, c, '周回開始')
             if job.auto_training:
                 await manage_rank_training_deck(
@@ -4289,6 +4289,9 @@ async def _run_job(job: FarmJob, email: str, password: str,
                     job.grind_battles += 1
                 elif job.grind_home:
                     job.stage_id, job.grind_home = job.grind_home, None
+
+                if not job.drop_enabled:
+                    c.befriend_off.add(job.stage_id)
 
                 await refresh_points(job, c, i)
                 if job.target_reached:
@@ -4640,7 +4643,7 @@ class YesNoView(discord.ui.View):
 
 
 class FoodModeView(discord.ui.View):
-    """自動編成の面で好物をどう使うか（FOOD_MODES）
+    """妖怪ドロップと合わせた好物の使い方（FOOD_MODES）
 
     job を渡すと周回中の変更用。選んだ時点でそのジョブに反映する（次のバトルから効く）。
     """
@@ -4656,21 +4659,34 @@ class FoodModeView(discord.ui.View):
 
     async def _answer(self, interaction: discord.Interaction, mode: str):
         self.choice = mode
-        text = f'🍙 好物：**{FOOD_MODES[mode]}** で開始します'
+        text = (f'🍙 妖怪ドロップ・好物を**有効**（{FOOD_MODES[mode]}）にして開始します'
+                if mode != 'off' else '✖ 妖怪ドロップ・好物を**無効**にして開始します')
         job = self.job
+        refresh_job = False
         if job is not None:
             if job.cancel.is_set() or find_job(job.user.id, job.jid) is None:
                 text = '❌ このジョブはもう終わっています。'
             else:
                 old, job.food_mode = job.food_mode, mode
+                job.drop_enabled = mode != 'off'
+                if job.client is not None:
+                    if job.drop_enabled:
+                        job.client.befriend_off.discard(job.stage_id)
+                    else:
+                        job.client.befriend_off.add(job.stage_id)
                 persist_jobs()
-                log_line(f'好物の使い方を変更 #{job.jid}: {old} → {mode}')
-                text = (f'🍙 **#{job.jid}** の好物を「**{FOOD_MODES[mode]}**」に変更しました'
-                        '（次のバトルから）。')
+                log_line(f'妖怪ドロップ・好物を変更 #{job.jid}: {old} → {mode}')
+                text = (f'🍙 **#{job.jid}** の妖怪ドロップ・好物を'
+                        f'**{"有効" if job.drop_enabled else "無効"}**に変更しました'
+                        + (f'（好物：{FOOD_MODES[mode]}）' if job.drop_enabled else '')
+                        + '。次のバトルから反映されます。')
+                refresh_job = True
         try:
             await interaction.response.edit_message(content=text, view=None)
         except discord.HTTPException:
             pass
+        if refresh_job and job is not None:
+            await push_progress(job)
         self.stop()
 
     @discord.ui.button(label='まだ持っていない妖怪だけ', emoji='🆕', style=discord.ButtonStyle.success)
@@ -4720,9 +4736,8 @@ class CancelView(discord.ui.View):
         button.callback = self._cancel
         self.add_item(button)
 
-        # 好物の使い方は自動編成のジョブだけ（それ以外の面では選べない）
-        if job is not None and job.auto_deck:
-            food = discord.ui.Button(label='好物', style=discord.ButtonStyle.secondary,
+        if job is not None:
+            food = discord.ui.Button(label='ドロップ・好物', style=discord.ButtonStyle.secondary,
                                      emoji='🍙', custom_id=f'ywp:food{suffix}')
             food.callback = self._food
             self.add_item(food)
@@ -4733,9 +4748,11 @@ class CancelView(discord.ui.View):
             return await interaction.response.send_message(
                 '❌ 実行中のジョブがありません（既に終了しています）', ephemeral=True)
         await interaction.response.send_message(
-            f'🍙 **#{job.jid}** の好物の使い方を選んでください'
-            f'（今：**{FOOD_MODES.get(job.food_mode, job.food_mode)}**）。\n'
-            '好物をあげれば仲間になるバトルだけあげます。変更は次のバトルから効きます。',
+            f'🍙 **#{job.jid}** の妖怪ドロップ・好物を設定してください'
+            f'（現在：**{"有効" if job.drop_enabled else "無効"}**'
+            + (f'・好物 {FOOD_MODES.get(job.food_mode, job.food_mode)}' if job.drop_enabled else '')
+            + '）。\n'
+            '有効にすると妖怪の仲間申告を行い、仲間になるバトルでは選んだ条件で好物を使います。',
             view=FoodModeView(interaction.user.id, job), ephemeral=True)
 
     async def _pause(self, interaction: discord.Interaction):
@@ -5082,17 +5099,17 @@ class FarmModal(discord.ui.Modal, title='ぷにぷに 自動周回'):
             password = self.password_label.component.value
             save_name = save_hint
 
-        # ドロップと自動育成は、ステージやプリセットに関係なく別々に確認する
-        ask_drop = YesNoView(interaction.user.id,
-                             '✅ ドロップを**有効**にして開始します',
-                             '✖ ドロップを**無効**にして開始します')
+        # 妖怪ドロップと好物は一つの設定として扱う
+        ask_drop_food = FoodModeView(interaction.user.id)
         await interaction.followup.send(
-            '**ドロップを有効にしますか？**\n'
-            '無効にすると、この周回では妖怪の仲間申告を行いません。\n'
-            f'{AUTO_DECK_ASK_TIMEOUT}秒以内に選ばない場合は無効で開始します。',
-            view=ask_drop, ephemeral=True)
-        await ask_drop.wait()
-        drop_enabled = bool(ask_drop.choice)
+            '**妖怪ドロップ・好物を有効にしますか？**\n'
+            '有効にすると妖怪の仲間申告を行い、好物も使用します。'
+            '「まだ持っていない妖怪だけ」か「持っていても使う」を選べます。\n'
+            f'{AUTO_DECK_ASK_TIMEOUT}秒以内に選ばない場合は両方無効で開始します。',
+            view=ask_drop_food, ephemeral=True)
+        await ask_drop_food.wait()
+        food_mode = ask_drop_food.choice or 'off'
+        drop_enabled = food_mode != 'off'
 
         ask_training = YesNoView(interaction.user.id,
                                  '✅ 自動育成を**有効**にして開始します',
@@ -5134,7 +5151,7 @@ class FarmModal(discord.ui.Modal, title='ぷにぷに 自動周回'):
         job.drop_asked = True
         job.drop_enabled = drop_enabled
         job.auto_deck = False
-        job.food_mode = 'off'
+        job.food_mode = food_mode
         job.auto_training = auto_training
         job.auto_levelup = auto_training
         job.resume_email = email        # 再起動後に続きから回すため（パスワードは持たない）
@@ -5169,7 +5186,7 @@ class FarmModal(discord.ui.Modal, title='ぷにぷに 自動周回'):
             'drop_asked': True,
             'drop_enabled': drop_enabled,
             'auto_deck': False,
-            'food_mode': 'off',
+            'food_mode': food_mode,
             'auto_levelup': auto_training,
             'auto_training': auto_training,
         })
@@ -6334,6 +6351,13 @@ def _validate_last_farm_profile(profile: dict) -> tuple[dict | None, str | None]
     if 'drop_enabled' not in normalized:
         normalized['drop_enabled'] = (
             not bool(profile.get('drop_asked')) or bool(profile.get('auto_deck')))
+    food_mode = profile.get('food_mode')
+    if food_mode not in ('off', 'new', 'all'):
+        food_mode = 'new' if normalized['drop_enabled'] else 'off'
+    elif food_mode == 'off' and normalized['drop_enabled']:
+        food_mode = 'new'
+    normalized['food_mode'] = food_mode
+    normalized['drop_enabled'] = food_mode != 'off'
     normalized['auto_training'] = bool(
         profile.get('auto_training', profile.get('auto_levelup', False)))
     return normalized, None
@@ -6366,7 +6390,8 @@ def _last_farm_preview_embed(profile: dict) -> discord.Embed:
     e.add_field(name='周回内容', value=f'{stage_text}\n回数: **{count_text}**\n目標: **{target_summary}**', inline=False)
     e.add_field(name='時間', value=(f'戦闘 {profile.get("battle_time")}秒 / クールダウン {profile.get("cooldown")}秒'), inline=False)
     e.add_field(name='追加設定', value=(
-        f'ドロップ: **{"ON" if profile.get("drop_enabled") else "OFF"}** / '
+        f'妖怪ドロップ・好物: **{"ON" if profile.get("drop_enabled") else "OFF"}**'
+        f'（{FOOD_MODES.get(profile.get("food_mode", "off"), profile.get("food_mode", "off"))}） / '
         f'自動育成: **{"ON" if profile.get("auto_training") else "OFF"}**'), inline=False)
     return e
 
@@ -6386,7 +6411,7 @@ class FarmRepeatEditModal(discord.ui.Modal, title='周回条件の変更'):
             'target_delta': '追加目標値',
             'battle_time': '戦闘時間（秒）',
             'cooldown': 'クールダウン（秒）',
-            'drop_enabled': 'ドロップ（true/false）',
+            'food_mode': 'ドロップ・好物（off/new/all）',
             'auto_training': '自動育成（true/false）',
         }
         default = profile.get(key)
@@ -6395,7 +6420,7 @@ class FarmRepeatEditModal(discord.ui.Modal, title='周回条件の変更'):
         elif key in {'drop_enabled', 'auto_training'}:
             default = 'true' if bool(default) else 'false'
         elif key in {'food_mode'}:
-            default = str(default)
+            default = str(default or 'off')
         elif isinstance(default, list):
             default = ','.join(str(v) for v in default)
         else:
@@ -6431,17 +6456,19 @@ class FarmRepeatEditModal(discord.ui.Modal, title='周回条件の変更'):
                 self.profile[key] = val
                 if key == 'auto_training':
                     self.profile['auto_levelup'] = val
+            elif key == 'food_mode':
+                if raw in ('', 'none', 'null', 'なし', 'off'):
+                    val = 'off'
+                elif raw not in ('new', 'all'):
+                    raise ValueError
+                else:
+                    val = raw
+                self.profile['food_mode'] = val
+                self.profile['drop_enabled'] = val != 'off'
             elif key == 'target_key':
                 if raw in ('', 'none', 'null', 'なし'):
                     self.profile[key] = None
                 elif raw not in ('ypoint', 'ymoney'):
-                    raise ValueError
-                else:
-                    self.profile[key] = raw
-            elif key == 'food_mode':
-                if raw in ('', 'none', 'null', 'なし', 'off'):
-                    self.profile[key] = 'off'
-                elif raw not in ('off', 'new', 'all'):
                     raise ValueError
                 else:
                     self.profile[key] = raw
@@ -6475,7 +6502,7 @@ class FarmRepeatEditSelectView(discord.ui.View):
                 discord.SelectOption(label='目標値', value='target_value'),
                 discord.SelectOption(label='戦闘時間', value='battle_time'),
                 discord.SelectOption(label='クールダウン', value='cooldown'),
-                discord.SelectOption(label='ドロップ', value='drop_enabled'),
+                discord.SelectOption(label='ドロップ・好物', value='food_mode'),
                 discord.SelectOption(label='自動育成', value='auto_training'),
             ],
         )
