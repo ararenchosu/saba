@@ -3877,6 +3877,7 @@ async def open_deck_levels(job: FarmJob, c: Client, youkai_levels) -> set[str]:
             job.level_unlocks += 1
             job.level_unlock_ymoney += paid
             log_line(f'上限解放: {youkai_name(yid)}（{yid}）Lv{lv} の上限を Yマネー{paid}で解放')
+            await push_progress(job)
         elif res in ('skip:Yマネー不足', 'skip:ひとだま優先'):
             opened.add(str(yid))                    # 貯まったらまた試す（まだ伸びる）
             if res == 'skip:ひとだま優先' and not job.level_wait_logged:
