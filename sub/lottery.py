@@ -108,6 +108,7 @@ def _lot(guild_id: int) -> dict:
     s.setdefault("sold", 0)
     s.setdefault("batch", 1)
     s.setdefault("user_counts", {})
+    s.setdefault("held", {})  # 未開封の所持数 {user_id(str): 枚数}
     return lot
 
 
@@ -431,9 +432,37 @@ class ScratchView(discord.ui.View):
         return None
 
     def _render(self, footer: str) -> str:
-        cells = [self.board[i] if self.revealed[i] else "❔" for i in range(9)]
-        grid = "\n".join(" ".join(cells[r * 3:(r + 1) * 3]) for r in range(3))
-        return f"✨ **スクラッチ**\n{grid}\n{footer}"
+        # 盤面そのものはボタン側に表示する（開けたボタンの上に絵柄が出る）
+        return f"✨ **スクラッチ**\n{footer}"
+
+    def _win_line(self):
+        """そろった当たり列のマス番号タプル（なければ None）"""
+        for line in SCRATCH_LINES:
+            a, b, c = line
+            if self.revealed[a] and self.revealed[b] and self.revealed[c]:
+                if self.board[a] == self.board[b] == self.board[c]:
+                    return line
+        return None
+
+    def _sync_buttons(self):
+        """ボタンの表示を盤面状態に合わせる: 開けたボタンには絵柄を表示し、
+        当たり列のボタンは緑色にする"""
+        win_line = self._win_line() or ()
+        for child in self.children:
+            if not (isinstance(child, discord.ui.Button) and child.custom_id):
+                continue
+            if not child.custom_id.startswith("lottery:cell:") or child.custom_id == "lottery:cell:all":
+                if self.settled:
+                    child.disabled = True
+                continue
+            i = int(child.custom_id.rsplit(":", 1)[1])
+            if self.revealed[i]:
+                child.label = self.board[i]
+                child.disabled = True
+                child.style = discord.ButtonStyle.success if i in win_line else discord.ButtonStyle.primary
+            else:
+                child.label = "❔"
+                child.disabled = self.settled
 
     async def _update(self, interaction: discord.Interaction):
         win = self._win_now()
@@ -451,18 +480,12 @@ class ScratchView(discord.ui.View):
                 footer = f"🎉 **{win} がそろった！ {fmt(prize)} ゲット！** 残高: {fmt(bal)}"
             else:
                 footer = "残念、ハズレでした… また挑戦してね！"
-            for child in self.children:
-                child.disabled = True
+            self._sync_buttons()
             await interaction.response.edit_message(content=self._render(footer), view=self)
             return
-        for child in self.children:
-            if isinstance(child, discord.ui.Button) and child.custom_id and child.custom_id.startswith("lottery:cell:") and child.custom_id != "lottery:cell:all":
-                i = int(child.custom_id.rsplit(":", 1)[1])
-                if self.revealed[i]:
-                    child.label = self.board[i]
-                    child.disabled = True
+        self._sync_buttons()
         left = self.revealed.count(False)
-        await interaction.response.edit_message(content=self._render(f"あと {left} マス。タップでめくれます"), view=self)
+        await interaction.response.edit_message(content=self._render(f"あと {left} マス。ボタンをタップでめくれます"), view=self)
 
     async def on_timeout(self):
         for child in self.children:
@@ -472,6 +495,135 @@ class ScratchView(discord.ui.View):
                 await self.message.edit(content=self._render("⏰ 時間切れで無効になりました"), view=self)
             except Exception:
                 pass
+
+
+# ---------------- スクラッチ: まとめ買い・開封 ----------------
+class ScratchBuyModal(discord.ui.Modal, title="スクラッチを買う"):
+    count = discord.ui.TextInput(label="何枚買いますか？", placeholder="例: 10", default="1", max_length=5)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        gid, uid = interaction.guild.id, interaction.user.id
+        lot = _lot(gid)
+        s = lot["scratch"]
+        if not s["open"]:
+            await interaction.response.send_message("⏸ スクラッチは現在未開催です。", ephemeral=True)
+            return
+        try:
+            n = int(str(self.count.value).strip())
+        except ValueError:
+            await interaction.response.send_message("枚数は数字で入力してください。", ephemeral=True)
+            return
+        bought = s["user_counts"].get(str(uid), 0)
+        max_buy = min(s["per_user"] - bought, s["cap"] - s["sold"])
+        if max_buy <= 0:
+            msg = "この弾は売り切れです。" if s["sold"] >= s["cap"] else f"この弾は1人 {s['per_user']}枚までです（購入済み {bought}枚）。"
+            await interaction.response.send_message(msg, ephemeral=True)
+            return
+        if n < 1 or n > max_buy:
+            await interaction.response.send_message(f"1〜{max_buy}枚の範囲で入力してください。", ephemeral=True)
+            return
+        cost = s["price"] * n
+        u = _wallet(gid, uid)
+        if u["money"] < cost:
+            await interaction.response.send_message(
+                f"残高が足りません（必要 {fmt(cost)} ／ 残高 {fmt(u['money'])}）。", ephemeral=True)
+            return
+        u["money"] -= cost
+        users.save()
+        s["sold"] += n
+        s["user_counts"][str(uid)] = bought + n
+        s["held"][str(uid)] = s["held"].get(str(uid), 0) + n
+        store.save_config()
+        await interaction.response.send_message(
+            f"✨ スクラッチを **{n}枚** 買いました（{fmt(cost)}）。未開封: {s['held'][str(uid)]}枚 ／ 残高: {fmt(u['money'])}\n"
+            "1枚ずつめくって遊ぶか、まとめて一括開封できます。",
+            view=OpenChoiceView(gid, uid), ephemeral=True)
+        await _refresh_panel(gid)
+
+
+def _bulk_open(guild_id: int, user_id: int):
+    """未開封を全部開ける。(開封数, {絵柄: 枚数}, ハズレ数, 合計賞金) を返す"""
+    lot = _lot(guild_id)
+    s = lot["scratch"]
+    n = s["held"].get(str(user_id), 0)
+    if n <= 0:
+        return 0, {}, 0, 0
+    s["held"][str(user_id)] = 0
+    store.save_config()
+    wins = {}
+    lose = 0
+    total = 0
+    for _ in range(n):
+        sym = _roll_scratch()
+        if sym is None:
+            lose += 1
+        else:
+            wins[sym] = wins.get(sym, 0) + 1
+            total += s["prizes"].get(sym, 0)
+    if total > 0:
+        _add_money(guild_id, user_id, total)
+    return n, wins, lose, total
+
+
+def _bulk_summary(guild_id: int, user_id: int, n, wins, lose, total) -> str:
+    parts = [f"{sym}×{c}" for sym, c in wins.items()]
+    parts.append(f"ハズレ×{lose}")
+    bal = _wallet(guild_id, user_id)["money"]
+    head = f"🎉 **一括開封の結果（{n}枚）**" if total > 0 else f"**一括開封の結果（{n}枚）**"
+    return (f"{head}\n{' ／ '.join(parts)}\n"
+            f"合計賞金: **{fmt(total)}** ／ 残高: {fmt(bal)}")
+
+
+async def _open_one(interaction: discord.Interaction):
+    """未開封を1枚使って、めくるタイプのスクラッチを開始する"""
+    gid, uid = interaction.guild.id, interaction.user.id
+    lot = _lot(gid)
+    s = lot["scratch"]
+    held = s["held"].get(str(uid), 0)
+    if held <= 0:
+        await interaction.response.send_message("未開封のスクラッチがありません。先に購入してください。", ephemeral=True)
+        return
+    s["held"][str(uid)] = held - 1
+    store.save_config()
+    win = _roll_scratch()
+    board = _make_board(win)
+    view = ScratchView(gid, uid, board, win)
+    await interaction.response.send_message(
+        view._render(f"タップでめくってね。1列そろえば当選！（残り未開封 {held - 1}枚）"),
+        view=view, ephemeral=True)
+    view.message = await interaction.original_response()
+
+
+class OpenChoiceView(discord.ui.View):
+    """購入後・パネルから使う「開け方えらび」"""
+    def __init__(self, guild_id: int, user_id: int):
+        super().__init__(timeout=600)
+        self.guild_id = guild_id
+        self.user_id = user_id
+
+    def _held(self) -> int:
+        return _lot(self.guild_id)["scratch"]["held"].get(str(self.user_id), 0)
+
+    @discord.ui.button(label="1枚開ける（めくる）", emoji="✨", style=discord.ButtonStyle.primary)
+    async def one(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("これはあなたのスクラッチではありません。", ephemeral=True)
+            return
+        await _open_one(interaction)
+
+    @discord.ui.button(label="一括開封する", emoji="🎉", style=discord.ButtonStyle.success)
+    async def bulk(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("これはあなたのスクラッチではありません。", ephemeral=True)
+            return
+        n, wins, lose, total = _bulk_open(self.guild_id, self.user_id)
+        if n <= 0:
+            await interaction.response.send_message("未開封のスクラッチがありません。", ephemeral=True)
+            return
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=_bulk_summary(self.guild_id, self.user_id, n, wins, lose, total), view=self)
 
 
 # ---------------- パネル ----------------
@@ -489,10 +641,12 @@ def _rules_text(guild_id: int) -> str:
         f"・賞金: {tiers}\n"
         "・同じ人が複数口当選することもあります。締切未設定の間は管理者が手動で抽選できます。\n\n"
         "**✨ スクラッチ**\n"
-        f"・1口 {fmt(s['price'])}。3×3のマスをめくり、タテ・ヨコ・ナナメのどれか1列が同じ絵柄でそろえば当選。\n"
+        f"・1口 {fmt(s['price'])}。まとめて買って未開封のまま貯めておけます。開け方は2通り："
+        "①1枚ずつ3×3をめくる ②一括開封でまとめて結果表示。\n"
         f"・賞金: {sp} ／ ハズレ 約{lose:g}%\n"
-        f"・1人 {s['per_user']}口まで（第{s['batch']}弾）。在庫がなくなると売り切れです。\n"
-        "・途中で閉じたり10分放置すると、そのスクラッチは無効になります。"
+        f"・1人 {s['per_user']}枚まで（第{s['batch']}弾）。在庫がなくなると売り切れです。\n"
+        "・未開封分はパネルの「スクラッチを開ける」からいつでも開けます。\n"
+        "・めくり始めたスクラッチを途中で閉じたり10分放置すると、その1枚は無効になります。"
     )
 
 
@@ -513,35 +667,23 @@ class LotteryPanelView(discord.ui.View):
     async def buy_scratch(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _guard(interaction):
             return
-        gid, uid = interaction.guild.id, interaction.user.id
-        lot = _lot(gid)
-        s = lot["scratch"]
-        if not s["open"]:
+        if not _lot(interaction.guild.id)["scratch"]["open"]:
             await interaction.response.send_message("⏸ スクラッチは現在未開催です。開催をお待ちください。", ephemeral=True)
             return
-        if s["sold"] >= s["cap"]:
-            await interaction.response.send_message("この弾は売り切れです。次の弾をお待ちください。", ephemeral=True)
+        await interaction.response.send_modal(ScratchBuyModal())
+
+    @discord.ui.button(label="スクラッチを開ける", emoji="🎴", style=discord.ButtonStyle.primary, custom_id="lottery:open_scratch", row=0)
+    async def open_scratch(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _guard(interaction):
             return
-        cnt = s["user_counts"].get(str(uid), 0)
-        if cnt >= s["per_user"]:
-            await interaction.response.send_message(f"この弾は1人 {s['per_user']}口までです（あなたは {cnt}口購入済み）。", ephemeral=True)
+        gid, uid = interaction.guild.id, interaction.user.id
+        held = _lot(gid)["scratch"]["held"].get(str(uid), 0)
+        if held <= 0:
+            await interaction.response.send_message("未開封のスクラッチがありません。「スクラッチを買う」から購入してください。", ephemeral=True)
             return
-        u = _wallet(gid, uid)
-        if u["money"] < s["price"]:
-            await interaction.response.send_message(
-                f"残高が足りません（必要 {fmt(s['price'])} ／ 残高 {fmt(u['money'])}）。", ephemeral=True)
-            return
-        u["money"] -= s["price"]
-        users.save()
-        s["sold"] += 1
-        s["user_counts"][str(uid)] = cnt + 1
-        store.save_config()
-        win = _roll_scratch()
-        board = _make_board(win)
-        view = ScratchView(gid, uid, board, win)
-        await interaction.response.send_message(view._render("タップでめくってね。1列そろえば当選！"), view=view, ephemeral=True)
-        view.message = await interaction.original_response()
-        await _refresh_panel(gid)
+        await interaction.response.send_message(
+            f"🎴 未開封のスクラッチが **{held}枚** あります。開け方を選んでください。",
+            view=OpenChoiceView(gid, uid), ephemeral=True)
 
     @discord.ui.button(label="自分のチケット", emoji="🎟", style=discord.ButtonStyle.secondary, custom_id="lottery:my", row=1)
     async def my_tickets(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -552,11 +694,12 @@ class LotteryPanelView(discord.ui.View):
         d, s = lot["draw"], lot["scratch"]
         my_draw = d["tickets"].count(uid)
         my_scratch = s["user_counts"].get(str(uid), 0)
+        my_held = s["held"].get(str(uid), 0)
         bal = _wallet(gid, uid)["money"]
         await interaction.response.send_message(
             f"🎟 **{interaction.user.display_name} のチケット**\n"
             f"抽選くじ（第{d['round']}回）: {my_draw}口\n"
-            f"スクラッチ（第{s['batch']}弾）: {my_scratch}口購入（上限 {s['per_user']}口）\n"
+            f"スクラッチ（第{s['batch']}弾）: {my_scratch}口購入（上限 {s['per_user']}口）／ 未開封 {my_held}枚\n"
             f"残高: {fmt(bal)}",
             ephemeral=True,
         )
@@ -885,7 +1028,7 @@ class LotteryAdminView(discord.ui.View):
                 store.save_config()
                 return f"📦 在庫をリセットしました（第{lot2['scratch']['batch']}弾スタート）。"
             await interaction.response.send_message(
-                "在庫をリセットして次の弾に進みますか？（販売数と1人あたりの購入数がリセットされます）",
+                "在庫をリセットして次の弾に進みますか？（販売数と1人あたりの購入数がリセットされます。未開封のスクラッチはそのまま開けます）",
                 view=ConfirmView(interaction.user.id, _do, "在庫リセット"), ephemeral=True)
 
 
