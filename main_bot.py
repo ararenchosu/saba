@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-main_bot.py — メインBOT（身内用）の本体
+sub/bot.py — サブBOT（本格用）の本体
 
 コマンド登録・起動時のパネル復旧・スラッシュコマンド同期を担当。
 実際の起動はランチャー main.py から start() が呼ばれて行われます。
-機能モジュールはルートの core.py / gate.py / recruit.py / settings.py / moderation.py / intro.py。
+機能モジュールはこの sub/ フォルダ内の各モジュール。トークンは SUB_DISCORD_TOKEN。
 """
 
 import time
@@ -13,17 +13,29 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
-from core import bot, store, TOKEN, requires
-import gate  # noqa: F401  （コマンド・イベント登録のため import）
-import recruit  # noqa: F401
-import settings  # noqa: F401
-import moderation  # noqa: F401
-import intro  # noqa: F401
-import invites  # noqa: F401  （招待トラッキング）
-from gate import RulesView, RolePanelView
-from recruit import RecruitPanelView, RecruitCardView, expire_recruitments
-from intro import IntroPanelView
-from invites import InvitePanelView
+from sub.core import bot, store, TOKEN, requires
+from sub import gate  # noqa: F401  （コマンド・イベント登録のため import）
+from sub import recruit  # noqa: F401
+from sub import settings  # noqa: F401
+from sub import moderation  # noqa: F401
+from sub import intro  # noqa: F401
+from sub import level  # noqa: F401  （高機能: レベル/XP）
+from sub import economy  # noqa: F401  （高機能: コイン経済）
+from sub import tickets  # noqa: F401  （高機能: チケット）
+from sub import utility  # noqa: F401  （高機能: 投票・抽選・リマインダー・情報）
+from sub import helpcmd  # noqa: F401  （/help コマンド一覧）
+from sub import invites  # noqa: F401  （招待トラッキング）
+from sub import casino  # noqa: F401  （カジノ）
+from sub import lottery  # noqa: F401  （宝くじ）
+from sub.gate import RulesView, RolePanelView
+from sub.recruit import RecruitPanelView, RecruitCardView, expire_recruitments
+from sub.intro import IntroPanelView
+from sub.tickets import TicketPanelView, TicketCloseView
+from sub.invites import InvitePanelView
+from sub.casino import CasinoPanelView
+from sub.lottery import LotteryPanelView
+from sub.utility import PollView, GiveawayView, utility_loop
+from sub.userdata import utility as utility_store
 
 # ===== スマホ表示パッチ（接続種別をモバイルに寄せる） =====
 # 接続時の自己申告（identify の properties）を Discord iOS に書き換えて、
@@ -75,8 +87,28 @@ async def cmd_help(interaction: discord.Interaction):
             "`/setup_intro` 自己紹介パネル設置 / `/setintro` 自己紹介の送信先設定\n"
             "`/setwelcome` / `/setlog` 投稿先チャンネル設定\n"
             "`/setup_gate` 認証ゲートの権限を一括適用\n"
-            "`/settings` 設定パネル（項目・ロール・NGワード編集）"
+            "`/settings` 設定パネル（項目・ロール・NGワード編集） / `/leveltoggle` レベル/XPのオン・オフ"
         ),
+        inline=False,
+    )
+    embed.add_field(
+        name="一般コマンド",
+        value=(
+            "`/rank` `/leaderboard` レベルと順位\n"
+            "`/balance` `/daily` `/pay` `/coinrank` コイン\n"
+            "`/poll` 投票 / `/giveaway` 抽選 / `/remind` リマインダー\n"
+            "`/userinfo` `/serverinfo` `/avatar` 情報表示"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="管理系コマンド",
+        value="`/warn` `/warns` `/clearwarns` 警告 / `/timeout` `/untimeout` / `/kick` `/ban` `/unban` / `/purge` 期間指定の一括削除 / `/export` 会話をtxt保存してDM送信 / `/setup_tickets` チケット設置",
+        inline=False,
+    )
+    embed.add_field(
+        name="招待",
+        value="`/setup_invite` 招待作成パネル / `/invites` 招待一覧 / `/invite_delete` 招待削除 / `/invite_guard` 招待ガード / `/reinvite` 抜けた人を呼び戻す",
         inline=False,
     )
     embed.add_field(name="使い方", value="募集は募集パネルのボタンから。ロールはロール選択パネルから付けられます。", inline=False)
@@ -138,7 +170,7 @@ async def on_tree_error(interaction: discord.Interaction, error: app_commands.Ap
 # 管理者向けコマンドは末尾に（管理者用）を付ける（オーナー専用コマンドはその旨を付ける）。
 
 def _status_entries():
-    entries = [f"{len(bot.guilds)} 件のサーバーで稼働中 | /bothelp でコマンド一覧"]
+    entries = [f"{len(bot.guilds)} 件のサーバーで稼働中 | /help でコマンド一覧"]
     for cmd in bot.tree.get_commands():
         desc = cmd.description or ""
         label = ""
@@ -191,7 +223,25 @@ async def on_ready():
     bot.add_view(RecruitPanelView())
     bot.add_view(IntroPanelView())
     bot.add_view(settings.SettingsView())  # 設定パネルを永続化（再起動後もボタンが効く）
+    bot.add_view(TicketPanelView())
+    bot.add_view(TicketCloseView())
     bot.add_view(InvitePanelView())
+    bot.add_view(CasinoPanelView())
+    bot.add_view(LotteryPanelView())
+    # 進行中の投票・抽選のボタンを復旧
+    for mid in utility_store.data.get("polls", {}):
+        try:
+            bot.add_view(PollView(int(mid)), message_id=int(mid))
+        except Exception as e:
+            print(f"投票復旧失敗 mid={mid}: {e}")
+    for mid, rec in utility_store.data.get("giveaways", {}).items():
+        if not rec.get("ended"):
+            try:
+                bot.add_view(GiveawayView(int(mid)), message_id=int(mid))
+            except Exception as e:
+                print(f"抽選復旧失敗 mid={mid}: {e}")
+    if not utility_loop.is_running():
+        utility_loop.start()
     for gid, cfg in store.configs.items():
         panels = cfg.get("panels", {})
         if "roles" in panels:
@@ -209,17 +259,17 @@ async def on_ready():
     if not expire_recruitments.is_running():
         expire_recruitments.start()
     try:
-        await bot.change_presence(activity=discord.Game(name=f"{len(bot.guilds)} 件のサーバーで稼働中 | /bothelp でコマンド一覧"))
+        await bot.change_presence(activity=discord.Game(name=f"{len(bot.guilds)} 件のサーバーで稼働中 | /help でコマンド一覧"))
     except Exception:
         pass
     if not rotate_status.is_running():
         rotate_status.start()
-    print("------ メインBOT（身内用） 起動完了 ------")
+    print("------ サブBOT（本格用） 起動完了 ------")
 
 
 async def start():
-    """メインBOTを起動する（ランチャー main.py から呼ばれる）"""
+    """サブBOTを起動する（ランチャー main.py から呼ばれる）"""
     if not TOKEN:
-        print("⚠️ メインBOTのトークン（DISCORD_TOKEN）が未設定のため、メインBOTは起動しません。")
+        print("⚠️ サブBOTのトークン（SUB_DISCORD_TOKEN）が未設定のため、サブBOTは起動しません。")
         return
     await bot.start(TOKEN)
