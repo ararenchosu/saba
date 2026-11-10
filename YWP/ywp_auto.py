@@ -2055,13 +2055,17 @@ class Client:
 
         リクエストは 2026-09-28 実機と同じ: gachaId・gachaCnt=1・候補なし。
         新しい妖怪は ywp_user_youkai_diff で返るので手元のセーブに重ねる（sort_deck 用）。
+        max_pulls=None の場合は回数制限を設けず、所持コインをすべて使う。
         戻り値: [(コインID, ガチャID, [手に入れた妖怪ID…])]
         """
         got = []
         for coin, gid, n, _ in self.coin_list():
-            for ids in self.pull_coin(coin, gid, min(n, max_pulls - len(got))):
+            remaining = n if max_pulls is None else min(n, max_pulls - len(got))
+            if remaining <= 0:
+                break
+            for ids in self.pull_coin(coin, gid, remaining):
                 got.append((coin, gid, ids))
-            if len(got) >= max_pulls:
+            if max_pulls is not None and len(got) >= max_pulls:
                 break
         return got
 

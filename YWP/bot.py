@@ -165,6 +165,7 @@ AGED_RETRY_WAIT = 4.0            # クリア再試行の間隔（秒）
 VIP_GACHA_COUNT = 240            # 既定の連数。サーバーの上限（limitTurnCnt）を超える指定は上限にする
 VIP_STAGE_GAP = (2.0, 5.0)       # 面と面のあいだの待ち（秒）
 VIP_STAGE_COUNT = 6              # 回し放題垢で先にクリアする面数（イベステ解放の16面の先頭から）
+COIN_ACCOUNT_STAGE_IDS = tuple(range(1001001, 1001016))
 VIP_PRICE = 0                    # 有料版の1垢の料金（円）。0 は未設定で、有料版は受け付けない
 VIP_PAID_MAX = 10                # 有料版で1回に注文できる垢の数
 VIP_EXIST_PRICE = 0              # 有料版「既存の垢に240連」の料金（円/1垢）。0 は未設定で受け付けない
@@ -1515,6 +1516,8 @@ class AccountRecord:
         self.vip_text: str | None = None
         self.vip_closed = False     # まわし放題ガシャが開催されていなかった
         self.vip_tally: collections.Counter = collections.Counter()   # 引いた妖怪（vip_tally）
+        self.coin_gacha_ok: bool | None = None
+        self.coin_gacha_text: str | None = None
 
 
 def find_auth_token(html: str) -> str | None:
@@ -1886,6 +1889,80 @@ async def make_vip_account(rec: AccountRecord, count: int, progress):
         await progress(f'⚠ まわし放題ガシャ失敗: `{rec.vip_text[:150]}`')
 
 
+def coin_gacha_result_text(c: Client, results: list) -> str:
+    """コインガチャで獲得した妖怪をランク順・重複数つきで表示する"""
+    ids = [str(yid) for _, _, pulled in results for yid in pulled]
+    if not ids:
+        return 'ガチャで妖怪は獲得できませんでした'
+    names = {row[0]: row[1] for row in c.master_table('ywp_mst_youkai')
+             if len(row) > 1}
+    tally = collections.Counter(ids)
+
+    def rank(yid):
+        try:
+            return c.youkai_rank(yid) or 0
+        except (KeyError, TypeError, ValueError):
+            return 0
+
+    lines = [
+        f'{RANK_NAMES.get(rank(yid), "?")} {names.get(yid, yid)}'
+        + (f' ×{count}' if count > 1 else '')
+        for yid, count in sorted(tally.items(), key=lambda item: (-rank(item[0]), item[0]))
+    ]
+    return f'ガチャ回数: {len(results)}回\n' + '\n'.join(lines)
+
+
+async def make_coin_gacha_account(rec: AccountRecord, progress):
+    """第1章1〜15面をクリアし、所持コインをすべて使って結果を記録する"""
+    rec.clear_target = '第1章 1〜15面'
+    if rec.client is None:
+        rec.cleared = False
+        rec.clear_error = 'セーブデータを作成できなかったため進行できません'
+        rec.coin_gacha_ok = False
+        rec.coin_gacha_text = 'ステージ進行に失敗したため、ガチャを引いていません'
+        await progress('⚠ セーブが無いためステージ進行・コインガチャを実行できません')
+        return
+
+    c = rec.client
+    try:
+        for index, stage_id in enumerate(COIN_ACCOUNT_STAGE_IDS, 1):
+            if ACCOUNT_PAUSE['paused'] or maint_window():
+                raise RuntimeError('メンテナンスまたは管理者停止のため中断しました')
+            if index > 1:
+                await asyncio.sleep(random.uniform(*VIP_STAGE_GAP))
+            await progress(
+                f'⚔ 第1章を進行中... ステージ `{stage_id}`（{index}/{len(COIN_ACCOUNT_STAGE_IDS)}）')
+            await clear_stage(c, stage_id, progress, inspect=False)
+        rec.cleared = True
+    except Exception as e:
+        rec.cleared = False
+        rec.clear_error = str(e)[:230]
+        rec.coin_gacha_ok = False
+        rec.coin_gacha_text = 'ステージ進行に失敗したため、ガチャを引いていません'
+        await progress(f'⚠ 第1章の進行に失敗: `{rec.clear_error[:150]}`')
+        return
+
+    await progress('🎰 所持コインをすべて使ってガチャを引いています...')
+    try:
+        coins = await asyncio.to_thread(c.coin_list)
+        expected = sum(count for _, _, count, _ in coins)
+        if not expected:
+            rec.coin_gacha_ok = True
+            rec.coin_gacha_text = '使用できるコインはありませんでした'
+            await progress('ℹ 使用できるコインがありませんでした')
+            return
+        results = await asyncio.to_thread(c.pull_coin_gachas, None)
+        rec.coin_gacha_text = coin_gacha_result_text(c, results)
+        rec.coin_gacha_ok = len(results) == expected
+        if not rec.coin_gacha_ok:
+            rec.coin_gacha_text += f'\n⚠ {expected}枚中{len(results)}枚を使用しました'
+        await progress(f'🎰 コインガチャ完了（{len(results)}/{expected}回）')
+    except Exception as e:
+        rec.coin_gacha_ok = False
+        rec.coin_gacha_text = f'ガチャに失敗しました: {str(e)[:180]}'
+        await progress(f'⚠ コインガチャに失敗: `{str(e)[:150]}`')
+
+
 async def vip_pull(c: Client, count: int, who: str):
     """ログイン済みの垢で まわし放題ガシャを count 連引く（新規垢・既存垢の共通）
 
@@ -1911,7 +1988,8 @@ def account_result_embed(rec: AccountRecord, index: int = 1, total: int = 1,
     title = f'🆕 {kind} 作成完了'
     if total > 1:
         title += f'（{index}/{total}件目）'
-    ok = rec.cleared is not False and rec.vip_ok is not False
+    ok = (rec.cleared is not False and rec.vip_ok is not False
+          and rec.coin_gacha_ok is not False)
     e = discord.Embed(color=COLOR_OK if ok else COLOR_WARN, title=title, timestamp=rec.created_at)
     e.add_field(name='メールアドレス', value=f'`{rec.email}`', inline=False)
     e.add_field(name='パスワード', value=f'||{rec.password}||', inline=False)
@@ -1942,6 +2020,10 @@ def account_result_embed(rec: AccountRecord, index: int = 1, total: int = 1,
                     value=(f'✅ {rec.vip_text}' if rec.vip_ok
                            else f'⚠ 引けませんでした\n`{(rec.vip_text or "")[:200]}`')[:1024],
                     inline=False)
+    if rec.coin_gacha_ok is not None:
+        e.add_field(name='🪙 コインガチャ',
+                    value=(rec.coin_gacha_text or '結果なし')[:1024],
+                    inline=False)
     e.add_field(
         name='ℹ 補足',
         value='・パスワードはスポイラーで隠してあります（タップで表示）\n'
@@ -1966,6 +2048,11 @@ def accounts_txt(records: list[AccountRecord], started_at: datetime,
     if kind == '回し放題垢':
         done = sum(1 for r in records if r.vip_ok)
         head.append(f'第1章クリア＋まわし放題ガシャ済み: {done}件 / {len(records)}件')
+    if kind == 'コインガチャ初期垢':
+        cleared = sum(1 for r in records if r.cleared)
+        done = sum(1 for r in records if r.coin_gacha_ok)
+        head.append(f'第1章1〜15面クリア: {cleared}件 / {len(records)}件')
+        head.append(f'コインガチャ完了: {done}件 / {len(records)}件')
     head += ['=' * 56, '']
     tail = []
     if kind == '回し放題垢':
@@ -1975,6 +2062,14 @@ def accounts_txt(records: list[AccountRecord], started_at: datetime,
             text = (r.vip_text or '').replace('**', '') if r.vip_ok else \
                 f'引けなかった: {r.vip_text or r.clear_error or "不明"}'
             tail += ['', r.email] + [f'  {line}' for line in text.splitlines()]
+        tail.append('')
+    if kind == 'コインガチャ初期垢':
+        tail = ['', '=' * 56, '第1章1〜15面・コインガチャ結果', '=' * 56]
+        for r in records:
+            stage_status = '完了' if r.cleared else f'失敗: {r.clear_error or "不明"}'
+            gacha_status = r.coin_gacha_text or '実行結果なし'
+            tail += ['', r.email, f'ステージ進行: {stage_status}']
+            tail += [f'  {line}' for line in gacha_status.splitlines()]
         tail.append('')
     return '\n'.join(head + [f'{r.email}:{r.password}' for r in records] + [''] + tail)
 
@@ -2101,6 +2196,7 @@ async def start_account_creation(interaction: discord.Interaction, count: int = 
                                  password: str | None = None,
                                  player_name: str | None = None,
                                  aged: bool = False, vip: int | None = None,
+                                 coin_gacha: bool = False,
                                  order: str | None = None, price: int = 0):
     """「アカウント作成」/「久垢作成」/「回し放題垢作成」の共通入口。count件ぶん連続で作成する
 
@@ -2108,13 +2204,15 @@ async def start_account_creation(interaction: discord.Interaction, count: int = 
     player_name アカウント名。空欄ならランダム。`{n}` は連番に置き換わる
     aged        Trueならセーブ作成後に AGED_STAGE_ID をクリアさせる（久垢）
     vip         連数を渡すと、第1章16面をクリアしてから まわし放題ガシャを引く（回し放題垢）
+    coin_gacha  Trueなら第1章1〜15面をクリアして所持コインをすべて使う
     order       有料版の取引番号（支払い確認済み）。回し放題まで済んだ垢が count 件そろうまで
                 作り直し（VIP_PAID_RETRY）、足りなければお客様とオーナーに知らせる
     price       有料版で受け取った金額（完了実績に載せる）
     ACCOUNT_TXT_THRESHOLD 件以上まとめて作るときは、1件ずつDMせずに
     最後に「メアド:パスワード」の .txt をDMで送る。
     """
-    kind = '久垢' if aged else '回し放題垢' if vip else '通常垢'
+    kind = ('コインガチャ初期垢' if coin_gacha else
+            '久垢' if aged else '回し放題垢' if vip else '通常垢')
     fixed_password = (password or '').strip() or None
     name_tpl = (player_name or '').strip() or None
     # 有料版（order あり）は支払いの前に同じ確認を済ませている。払った後は断らない
@@ -2188,8 +2286,11 @@ async def start_account_creation(interaction: discord.Interaction, count: int = 
                         await progress(f'{head}❌ {i}件目は失敗: `{str(e)[:200]}`')
                         continue
 
+                    if coin_gacha:
+                        log_line(f'コインガチャ初期垢 開始 email={rec.email}')
+                        await make_coin_gacha_account(rec, lambda t, h=head: progress(h + t))
                     # 久垢はここで初回ステージまでクリアさせる
-                    if aged:
+                    elif aged:
                         if rec.client is None:
                             rec.cleared = False
                             rec.clear_error = 'セーブデータが作れなかったためクリアできません'
@@ -2265,6 +2366,11 @@ async def start_account_creation(interaction: discord.Interaction, count: int = 
         if aged:
             done = sum(1 for r in records if r.cleared)
             summary += f'\n⚔ ステージ`{AGED_STAGE_ID}`クリア: {done}件 / {len(records)}件'
+        if coin_gacha:
+            cleared = sum(1 for r in records if r.cleared)
+            pulled = sum(1 for r in records if r.coin_gacha_ok)
+            summary += f'\n⚔ 第1章1〜15面クリア: {cleared}件 / {len(records)}件'
+            summary += f'\n🎰 コインガチャ完了: {pulled}件 / {len(records)}件'
         if vip:
             done = sum(1 for r in records if r.vip_ok)
             summary += f'\n🎰 第1章クリア＋まわし放題ガシャ: {done}件 / {len(records)}件'
@@ -5341,9 +5447,16 @@ class AccountCountModal(discord.ui.Modal, title='アカウント作成'):
             placeholder='例: テスト{n}', required=False, max_length=PLAYER_NAME_MAX + 3),
     )
 
-    def __init__(self, aged: bool = False):
-        super().__init__(title='久垢作成' if aged else 'アカウント作成')
+    def __init__(self, aged: bool = False, coin_gacha: bool = False):
+        title = ('コインガチャ初期垢' if coin_gacha else
+                 '久垢作成' if aged else 'アカウント作成')
+        super().__init__(title=title)
         self.aged = aged
+        self.coin_gacha = coin_gacha
+        if coin_gacha:
+            self.count.description = (
+                f'第1章1〜15面をクリア後、所持コインをすべて使います。'
+                f'1〜{MAX_ACCOUNTS_PER_RUN:,}件（結果はTXTでDM）')
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -5356,10 +5469,39 @@ class AccountCountModal(discord.ui.Modal, title='アカウント作成'):
                 ephemeral=True)
         await start_account_creation(
             interaction, n, self.password.component.value,
-            self.name.component.value, aged=self.aged)
+            self.name.component.value, aged=self.aged,
+            coin_gacha=self.coin_gacha)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
         await report_error(interaction, error, 'AccountCountModal')
+
+
+class AccountModeView(discord.ui.View):
+    """通常作成か、15面進行＋コインガチャ付き作成かを選ぶ"""
+
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=180)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                'このアカウント作成メニューは開いた人だけが操作できます。',
+                ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label='通常アカウント', style=discord.ButtonStyle.secondary,
+                       emoji='🆕')
+    async def normal(self, interaction: discord.Interaction,
+                     button: discord.ui.Button):
+        await interaction.response.send_modal(AccountCountModal())
+
+    @discord.ui.button(label='15面クリア＋コインガチャ', style=discord.ButtonStyle.primary,
+                       emoji='🎰')
+    async def coin_gacha(self, interaction: discord.Interaction,
+                         button: discord.ui.Button):
+        await interaction.response.send_modal(AccountCountModal(coin_gacha=True))
 
 
 class VipAccountModal(AccountCountModal):
@@ -6720,7 +6862,9 @@ class PanelView(discord.ui.View):
         if interaction.user.id in ACCOUNT_RUNNING:
             return await interaction.response.send_message(
                 '⏳ アカウント作成が実行中です。完了までお待ちください。', ephemeral=True)
-        await interaction.response.send_modal(AccountCountModal())
+        await interaction.response.send_message(
+            '作成するアカウントの種類を選んでください。',
+            view=AccountModeView(interaction.user.id), ephemeral=True)
 
     @discord.ui.button(label='前回の条件で再周回', style=discord.ButtonStyle.secondary,
                        emoji='🔁', custom_id='ywp:repeat')
@@ -7189,9 +7333,12 @@ def panel_embed() -> discord.Embed:
             '↳ ⏸ 一時停止 / ▶ 再開 / ⏹ 中止 はジョブ単位\n'
             '↳ 所持数は **🔄 更新** を押したときに取得\n'
             '🔁 **前回の条件で再周回**: 保存したアカウント・セーブ・設定で再スタート\n'
-            '🆕 **アカウント作成**: 捨てメールでLEVEL5 IDと周回用セーブデータを作成\n'
+            '🆕 **アカウント作成**: 通常作成、または初期垢＋コインガチャを選択\n'
+            '↳ 捨てメールでLEVEL5 IDと周回用セーブデータを作成\n'
             '↳ 作成数・パスワード固定・アカウント名を指定可能\n'
             f'↳ {ACCOUNT_TXT_THRESHOLD}件以上は `メアド:パスワード` の.txtをDMに添付\n'
+            '🎰 **初期垢＋コインガチャ**: 第1章1〜15面をクリアして所持コインをすべて使用\n'
+            '↳ メール・パスワード・獲得キャラを記載した.txtをDMに添付\n'
             f'🕰 **久垢作成**: ステージ`{AGED_STAGE_ID}`クリア済みのアカウントは '
             '`/久垢作成設置` のパネルから作成\n\n'
             '💡 ステージIDが不明なら **📋 ステージ一覧** を確認\n'
