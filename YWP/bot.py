@@ -1978,13 +1978,18 @@ async def make_coin_gacha_account(rec: AccountRecord, progress):
         if not expected:
             rec.coin_gacha_ok = True
             rec.coin_gacha_text = '使用できるコインはありませんでした'
+            log_line(f'コインガチャ対象なし email={rec.email} 郵便={rec.present_text}')
             await progress('ℹ 使用できるコインがありませんでした')
             return
-        results = await asyncio.to_thread(c.pull_coin_gachas, None)
+        log_line(f'コインガチャ開始 email={rec.email} 対象={coins}')
+        results = await asyncio.to_thread(c.pull_coin_gachas, None, coins)
         rec.coin_gacha_text = coin_gacha_result_text(c, results)
         rec.coin_gacha_ok = len(results) == expected
         if not rec.coin_gacha_ok:
             rec.coin_gacha_text += f'\n⚠ {expected}枚中{len(results)}枚を使用しました'
+            log_line(f'コインガチャ未完了 email={rec.email} 予定={expected} 実行={len(results)}')
+        else:
+            log_line(f'コインガチャ完了 email={rec.email} 回数={len(results)}')
         await progress(f'🎰 コインガチャ完了（{len(results)}/{expected}回）')
     except Exception as e:
         rec.coin_gacha_ok = False

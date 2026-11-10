@@ -2034,6 +2034,9 @@ class Client:
 
     # --- ガチャ -----------------------------------------------------------------
 
+    # Mail-reported coin IDs that may be missing from the cached item master.
+    KNOWN_COIN_ITEM_IDS = frozenset({'25229'})
+
     def coin_gachas(self, table, now=None):
         """コインで引くガチャ {コインのアイテムID: ガチャID}（ywp_mst_gacha の行から）
 
@@ -2041,8 +2044,9 @@ class Client:
         種別 2 がアイテム（コイン）払い。例: 7001 は 1つ星コイン(25010) 1枚で1回。
         """
         now = now or datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        # 払い物にはチケット類も混じるので、名前に「コイン」が付くアイテムだけにする
+        # 払い物にはチケット類も混じるので、名前判定に加えて既知のコインIDだけ許可する
         coins = {r[0] for r in self.master_table('ywp_mst_item') if len(r) > 2 and 'コイン' in r[2]}
+        coins.update(self.KNOWN_COIN_ITEM_IDS)
         out = {}
         for r in rows(table):
             if (len(r) > 11 and r[3] == '2' and r[4] in coins and r[5] == '1'
@@ -2050,16 +2054,17 @@ class Client:
                 out.setdefault(r[4], r[0])
         return out
 
-    def pull_coin_gachas(self, max_pulls=30):
+    def pull_coin_gachas(self, max_pulls=30, coins=None):
         """持っているコインを全部使ってガチャを引く（initGacha → executeGacha を1回ずつ）
 
         リクエストは 2026-09-28 実機と同じ: gachaId・gachaCnt=1・候補なし。
         新しい妖怪は ywp_user_youkai_diff で返るので手元のセーブに重ねる（sort_deck 用）。
         max_pulls=None の場合は回数制限を設けず、所持コインをすべて使う。
+        coins を渡した場合は一覧を再取得せず、そのコイン一覧を処理する。
         戻り値: [(コインID, ガチャID, [手に入れた妖怪ID…])]
         """
         got = []
-        for coin, gid, n, _ in self.coin_list():
+        for coin, gid, n, _ in self.coin_list() if coins is None else coins:
             remaining = n if max_pulls is None else min(n, max_pulls - len(got))
             if remaining <= 0:
                 break
