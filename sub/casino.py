@@ -1,17 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-sub/casino.py — カジノ（サブBOT専用）
+sub/casino.py — カジノ（サブBOT専用）【メニュー式パネル版】
 
-通貨は $ 。所持金は users.json に保存（money）。
-- パネル（/setup_casino で設置）: ログインボーナス（ボタン式・1日1回 $5000）/ 残高 / ランキング / 4ゲーム
-- ゲーム: スロット / バカラ / ハイアンドロー / マインズ（掛け金はモーダル入力式）
-- お金の増減はサーバーオーナー専用コマンド /money_add /money_remove のみ
-- ゲームの結果はすべて自分だけ見える（ephemeral）表示
+仕様（2026-11-10 刷新）:
+- パネルはボタンではなく「セレクトメニュー×2」で操作する。
+  - 機能メニュー: ログインボーナス / 所持金確認 / ルール説明 / 全体ランキング
+  - ゲームメニュー: GAMES レジストリに登録されたゲームだけが並ぶ。
+- 旧ゲーム（スロット / バカラ / ハイアンドロー / マインズ）は全廃止。
+  ゲームは今後 GAMES へ追加していく。
+- パネルの設置場所は cfg["panels"]["casino"] に保存し、BOT起動時に
+  最新のメニュー内容で自動編集する。そのため、新しいゲーム（メニュー項目でも
+  ボタンでも）を追加して再デプロイすると、設置済みパネルにも自動で反映される。
+  （/setup_casino の再実行は不要）
+- 通貨は $ 。所持金は users.json に保存（money）。コイン経済とは別。
+- お金の増減はサーバーオーナー専用コマンド /money_add /money_remove のみ。
 """
 
-import random
 from datetime import datetime, timedelta, timezone
-from math import comb
 
 import discord
 from discord import app_commands
@@ -21,7 +26,6 @@ from sub.userdata import users
 
 JST = timezone(timedelta(hours=9))
 LOGIN_BONUS = 5000
-MIN_BET = 10
 
 
 def _wallet(guild_id: int, user_id: int) -> dict:
@@ -46,557 +50,237 @@ async def _guard(interaction) -> bool:
     return True
 
 
-def _parse_bet(raw: str):
-    try:
-        return int(raw.strip().replace(",", "").replace("$", "").replace("＄", ""))
-    except Exception:
-        return None
+# ---------------- ゲームレジストリ ----------------
+# ゲームを追加するときは、ここに register_game(...) を書く（または他モジュールから呼ぶ）。
+# start には async def start(interaction) を渡す。登録したゲームは次回起動時に
+# 設置済みパネルのゲームメニューへ自動で追加される。
+GAMES = []
 
 
-# ---------------- スロット ----------------
-SLOT_SYMBOLS = ["🍒", "🍋", "🔔", "⭐", "💎", "7️⃣"]
-SLOT_WEIGHTS = [30, 26, 20, 12, 8, 4]
-SLOT_TRIPLE = {"🍒": 4, "🍋": 6, "🔔": 10, "⭐": 15, "💎": 25, "7️⃣": 50}
+def register_game(game_id: str, label: str, start, emoji: str = "🎮", description: str = "", rules: str = ""):
+    GAMES.append(
+        {
+            "id": game_id,
+            "label": label,
+            "emoji": emoji,
+            "description": description,
+            "rules": rules,
+            "start": start,
+        }
+    )
 
 
-def slot_spin():
-    return [random.choices(SLOT_SYMBOLS, SLOT_WEIGHTS)[0] for _ in range(3)]
+def _find_game(game_id: str):
+    for g in GAMES:
+        if g["id"] == game_id:
+            return g
+    return None
 
 
-def slot_payout(bet: int, reels) -> int:
-    if reels[0] == reels[1] == reels[2]:
-        return bet * SLOT_TRIPLE[reels[0]]
-    if len(set(reels)) == 2:
-        return int(bet * 1.2)
-    return 0
-
-
-# ---------------- バカラ ----------------
-RANKS = [(1, "A"), (2, "2"), (3, "3"), (4, "4"), (5, "5"), (6, "6"), (7, "7"), (8, "8"), (9, "9"), (10, "10"), (11, "J"), (12, "Q"), (13, "K")]
-SUITS = ["♠️", "♥️", "♦️", "♣️"]
-
-
-def _new_shoe():
-    deck = [(r, s) for r, _ in RANKS for s in SUITS]
-    random.shuffle(deck)
-    return deck
-
-
-def _card_text(card) -> str:
-    rank, suit = card
-    label = dict(RANKS)[rank]
-    return f"{suit}{label}"
-
-
-def _hand_value(cards) -> int:
-    return sum(min(r, 10) if r > 10 else (0 if r == 10 else r) for r, _ in cards) % 10
-
-
-def deal_baccarat():
-    """(player_cards, banker_cards) を正式ルールで配る"""
-    deck = _new_shoe()
-    player = [deck.pop(), deck.pop()]
-    banker = [deck.pop(), deck.pop()]
-    pv, bv = _hand_value(player), _hand_value(banker)
-    if pv < 8 and bv < 8:  # ナチュラルでなければ続行
-        p_third = None
-        if pv <= 5:
-            p_third = deck.pop()
-            player.append(p_third)
-        if p_third is None:
-            if bv <= 5:
-                banker.append(deck.pop())
-        else:
-            t = _hand_value([p_third])
-            if bv <= 2:
-                banker.append(deck.pop())
-            elif bv == 3 and t != 8:
-                banker.append(deck.pop())
-            elif bv == 4 and t in (2, 3, 4, 5, 6, 7):
-                banker.append(deck.pop())
-            elif bv == 5 and t in (4, 5, 6, 7):
-                banker.append(deck.pop())
-            elif bv == 6 and t in (6, 7):
-                banker.append(deck.pop())
-    return player, banker
-
-
-def baccarat_winner(player, banker) -> str:
-    pv, bv = _hand_value(player), _hand_value(banker)
-    if pv > bv:
-        return "player"
-    if bv > pv:
-        return "banker"
-    return "tie"
-
-
-def baccarat_payout(bet: int, side: str, winner: str) -> int:
-    """払い戻し総額（掛け金含む）。負けは0、タイ結果でプレイヤー/バンカー賭けは返金"""
-    if winner == "tie":
-        if side == "tie":
-            return bet * 8
-        return bet  # プッシュ（返金）
-    if side == winner == "player":
-        return bet * 2
-    if side == winner == "banker":
-        return int(bet * 1.95)
-    return 0
-
-
-# ---------------- ハイアンドロー ----------------
-def hl_step_multiplier(current_rank: int, high: bool):
-    """次の1手の倍率。当てられるランク数から算出（同数はノーカウント前提）。不可能なら None"""
-    w = (13 - current_rank) if high else (current_rank - 1)
-    if w <= 0:
-        return None
-    return 12 / w * 0.97
-
-
-class HighLowView(discord.ui.View):
-    """当てるたび倍率が上がり、自分でやめる（キャッシュアウト）か外れるまで続く連続式"""
-
-    def __init__(self, bet: int):
-        super().__init__(timeout=600)
-        self.bet = bet
-        self.deck = _new_shoe()
-        self.current = self.deck.pop()
-        self.streak = 0
-        self.mult = 1.0
-        self.finished = False
-        self.btn_high = discord.ui.Button(style=discord.ButtonStyle.primary, row=0)
-        self.btn_high.callback = lambda i: self._guess(i, True)
-        self.btn_low = discord.ui.Button(style=discord.ButtonStyle.primary, row=0)
-        self.btn_low.callback = lambda i: self._guess(i, False)
-        self.btn_stop = discord.ui.Button(label="💰 やめる（キャッシュアウト）", style=discord.ButtonStyle.success, row=1)
-        self.btn_stop.callback = self._stop
-        self.add_item(self.btn_high)
-        self.add_item(self.btn_low)
-        self.add_item(self.btn_stop)
-        self._sync_buttons()
-
-    def _draw(self):
-        if len(self.deck) < 5:
-            self.deck = _new_shoe()
-        return self.deck.pop()
-
-    def _cashout_amount(self) -> int:
-        return int(self.bet * self.mult)
-
-    def _sync_buttons(self):
-        rank = self.current[0]
-        mh = hl_step_multiplier(rank, True)
-        ml = hl_step_multiplier(rank, False)
-        self.btn_high.label = f"⬆️ ハイ（×{mh:.2f}）" if mh else "⬆️ ハイ（選べません）"
-        self.btn_high.disabled = mh is None or self.finished
-        self.btn_low.label = f"⬇️ ロー（×{ml:.2f}）" if ml else "⬇️ ロー（選べません）"
-        self.btn_low.disabled = ml is None or self.finished
-        self.btn_stop.disabled = self.finished
-        if self.streak > 0:
-            self.btn_stop.label = f"💰 やめる（{fmt(self._cashout_amount())} 確定）"
-
-    def build_embed(self, note: str = None) -> discord.Embed:
-        embed = discord.Embed(title="🔼 ハイアンドロー", color=discord.Color.blurple())
-        embed.description = (
-            f"現在のカード: **{_card_text(self.current)}**\n"
-            f"連続成功: {self.streak} 回 / 現在の倍率: ×{self.mult:.2f} / キャッシュアウト額: **{fmt(self._cashout_amount())}**\n"
-            "当て続けると倍率が上がります。外れたら掛け金は没収。「やめる」で今の額を確定できます。同数はノーカウントで継続。"
+# ---------------- 機能メニューの中身 ----------------
+async def _feat_bonus(interaction: discord.Interaction):
+    u = _wallet(interaction.guild.id, interaction.user.id)
+    if u["login_bonus_date"] == _today():
+        await interaction.response.send_message(
+            "今日のログインボーナスはもう受け取り済みだよ。明日（日本時間0時〜）また選んでね。",
+            ephemeral=True,
         )
-        embed.add_field(name="掛け金", value=fmt(self.bet), inline=False)
-        if note:
-            embed.add_field(name="経過", value=note, inline=False)
-        return embed
-
-    async def _guess(self, interaction: discord.Interaction, high: bool):
-        if self.finished:
-            await interaction.response.defer()
-            return
-        step = hl_step_multiplier(self.current[0], high)
-        if step is None:
-            await interaction.response.defer()
-            return
-        nxt = self._draw()
-        cur_r, nxt_r = self.current[0], nxt[0]
-        if nxt_r == cur_r:
-            note = f"{_card_text(self.current)} → {_card_text(nxt)} 同数！ノーカウントで継続します"
-            self.current = nxt
-            self._sync_buttons()
-            await interaction.response.edit_message(embed=self.build_embed(note), view=self)
-            return
-        if (nxt_r > cur_r) == high:
-            self.streak += 1
-            self.mult *= step
-            note = f"{_card_text(self.current)} → {_card_text(nxt)} ⭕ 当たり！（{self.streak}連続）"
-            self.current = nxt
-            self._sync_buttons()
-            await interaction.response.edit_message(embed=self.build_embed(note), view=self)
-            return
-        self.finished = True
-        self._sync_buttons()
-        u = _wallet(interaction.guild.id, interaction.user.id)
-        embed = discord.Embed(title="🔼 ハイアンドロー", color=discord.Color.red())
-        embed.description = f"{_card_text(self.current)} → {_card_text(nxt)} ❌ ハズレ…"
-        embed.add_field(name="結果", value=f"{self.streak} 連続で終了。**{fmt(self.bet)}** を失いました", inline=False)
-        embed.add_field(name="残高", value=fmt(u["money"]), inline=False)
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    async def _stop(self, interaction: discord.Interaction):
-        if self.finished:
-            await interaction.response.defer()
-            return
-        self.finished = True
-        self._sync_buttons()
-        amount = self._cashout_amount()
-        u = _wallet(interaction.guild.id, interaction.user.id)
-        u["money"] += amount
-        users.save()
-        embed = discord.Embed(title="🔼 ハイアンドロー", color=discord.Color.green())
-        embed.description = f"現在のカード: **{_card_text(self.current)}**（{self.streak} 連続成功）"
-        if amount > self.bet:
-            embed.add_field(name="結果", value=f"💰 **{fmt(amount)}** をキャッシュアウト（+{fmt(amount - self.bet)}）！", inline=False)
-        else:
-            embed.add_field(name="結果", value=f"掛け金 **{fmt(amount)}** をそのまま回収しました", inline=False)
-        embed.add_field(name="残高", value=fmt(u["money"]), inline=False)
-        await interaction.response.edit_message(embed=embed, view=self)
-
-
-# ---------------- マインズ ----------------
-MINES_TILES = 20
-
-
-def mines_multiplier(tiles: int, mines: int, revealed: int) -> float:
-    if revealed <= 0:
-        return 1.0
-    return comb(tiles, revealed) / comb(tiles - mines, revealed) * 0.97
-
-
-# ---------------- 掛け金モーダル ----------------
-
-def _play_slot(guild_id: int, user_id: int, bet: int):
-    """掛け金を引いて1回回す。(リール, 払戻, 残高) を返す"""
-    u = _wallet(guild_id, user_id)
-    u["money"] -= bet
-    reels = slot_spin()
-    pay = slot_payout(bet, reels)
-    u["money"] += pay
+        return
+    u["login_bonus_date"] = _today()
+    u["money"] += LOGIN_BONUS
     users.save()
-    return reels, pay, u["money"]
+    await interaction.response.send_message(
+        f"💰 ログインボーナス **{fmt(LOGIN_BONUS)}** を受け取りました！ 残高: {fmt(u['money'])}",
+        ephemeral=True,
+    )
 
 
-def _slot_embed(bet: int, reels, pay: int, balance: int) -> discord.Embed:
-    embed = discord.Embed(title="🎰 スロット", color=discord.Color.gold() if pay > bet else discord.Color.greyple())
-    embed.description = f"## {' '.join(reels)}"
-    if pay > bet:
-        embed.add_field(name="結果", value=f"🎉 当たり！ **{fmt(pay)}** 獲得（+{fmt(pay - bet)}）", inline=False)
-    elif pay > 0:
-        embed.add_field(name="結果", value=f"ペアで **{fmt(pay)}** 戻ってきました（-{fmt(bet - pay)}）", inline=False)
+async def _feat_balance(interaction: discord.Interaction):
+    u = _wallet(interaction.guild.id, interaction.user.id)
+    bonus = "受け取り済み" if u["login_bonus_date"] == _today() else "まだ受け取れます"
+    await interaction.response.send_message(
+        f"👛 {interaction.user.display_name} の所持金は **{fmt(u['money'])}** です。\n今日のログインボーナス: {bonus}",
+        ephemeral=True,
+    )
+
+
+def _rules_text() -> str:
+    lines = [
+        f"・通貨は **$**（所持金）。サーバーごとに別々に管理されます",
+        f"・💰 ログインボーナスは1日1回 **{fmt(LOGIN_BONUS)}**（日本時間 0:00 リセット）。機能メニューから受け取ってね",
+        "・遊び方は、パネルのメニューから項目を選ぶだけ",
+        "・お金の追加・没収はサーバーオーナーだけができます",
+    ]
+    if GAMES:
+        lines.append("")
+        lines.append("**🎮 ゲームのルール**")
+        for g in GAMES:
+            if g["rules"]:
+                lines.append(f"・{g['emoji']} {g['label']}: {g['rules']}")
     else:
-        embed.add_field(name="結果", value=f"ハズレ… **{fmt(bet)}** を失いました", inline=False)
-    embed.add_field(name="残高", value=fmt(balance), inline=False)
+        lines.append("・ゲームは今後追加予定です。追加されたら、このパネルにも自動で表示されます")
+    return "\n".join(lines)
+
+
+async def _feat_rules(interaction: discord.Interaction):
+    embed = discord.Embed(title="📖 カジノのルール", description=_rules_text(), color=discord.Color.gold())
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+async def _feat_ranking(interaction: discord.Interaction):
+    rows = []
+    for uid, rec in users.guild_users(interaction.guild.id).items():
+        rows.append((int(uid), rec.get("money", 0)))
+    rows.sort(key=lambda x: x[1], reverse=True)
+    lines = ["**🏆 所持金ランキング**"]
+    if not rows:
+        lines.append("まだデータがありません。")
+    for i, (uid, money) in enumerate(rows[:10], 1):
+        member = interaction.guild.get_member(uid)
+        name = member.display_name if member else f"ユーザー {uid}"
+        lines.append(f"{i}. {name} … **{fmt(money)}**")
+    for i, (uid, money) in enumerate(rows, 1):
+        if uid == interaction.user.id:
+            if i > 10:
+                lines.append(f"— あなたの順位: {i}位（{fmt(money)}）")
+            break
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+_FEATURE_HANDLERS = {
+    "bonus": _feat_bonus,
+    "balance": _feat_balance,
+    "rules": _feat_rules,
+    "ranking": _feat_ranking,
+}
+
+
+# ---------------- パネル（セレクトメニュー×2） ----------------
+class FeatureSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="ログインボーナス", value="bonus", emoji="💰", description=f"1日1回 {fmt(LOGIN_BONUS)} を受け取る"),
+            discord.SelectOption(label="所持金確認", value="balance", emoji="👛", description="自分の残高とボーナス状況を見る"),
+            discord.SelectOption(label="ルール説明", value="rules", emoji="📖", description="カジノのルールとゲームの説明"),
+            discord.SelectOption(label="全体ランキング", value="ranking", emoji="🏆", description="所持金ランキング（上位10人＋自分の順位）"),
+        ]
+        super().__init__(custom_id="casino:feature_menu", placeholder="🎰 機能メニューを開く", options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await _guard(interaction):
+            return
+        handler = _FEATURE_HANDLERS.get(self.values[0] if self.values else "")
+        if handler is not None:
+            await handler(interaction)
+
+
+class GameSelect(discord.ui.Select):
+    def __init__(self):
+        if GAMES:
+            options = [
+                discord.SelectOption(
+                    label=g["label"],
+                    value=g["id"],
+                    emoji=g["emoji"] or None,
+                    description=(g["description"] or None),
+                )
+                for g in GAMES
+            ]
+            super().__init__(custom_id="casino:game_menu", placeholder="🎮 遊ぶゲームを選ぶ", options=options, row=1)
+        else:
+            options = [discord.SelectOption(label="ゲームは準備中です", value="__none__")]
+            super().__init__(
+                custom_id="casino:game_menu",
+                placeholder="🎮 ゲームメニュー（準備中）",
+                options=options,
+                row=1,
+                disabled=True,
+            )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await _guard(interaction):
+            return
+        game = _find_game(self.values[0] if self.values else "")
+        if game is None:
+            await interaction.response.send_message("そのゲームはまだ遊べません。", ephemeral=True)
+            return
+        await game["start"](interaction)
+
+
+class CasinoPanelView(discord.ui.View):
+    """永続ビュー（カスタムID固定）。中身は GAMES の内容から組み立てる。"""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(FeatureSelect())
+        self.add_item(GameSelect())
+
+
+def build_panel_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🎰 カジノ",
+        description=(
+            "下のメニューから選んで遊べます。通貨は **$** です。\n"
+            f"まずは機能メニューから 💰 ログインボーナス（1日1回 **{fmt(LOGIN_BONUS)}**）を受け取ってね。"
+        ),
+        color=discord.Color.gold(),
+    )
+    if GAMES:
+        game_lines = [f"{g['emoji']} {g['label']}" + (f" — {g['description']}" if g["description"] else "") for g in GAMES]
+        embed.add_field(name="🎮 遊べるゲーム", value="\n".join(game_lines), inline=False)
+    else:
+        embed.add_field(name="🎮 遊べるゲーム", value="準備中です。ゲームが追加されると、ここに自動で表示されます。", inline=False)
     return embed
 
 
-class SlotAgainView(discord.ui.View):
-    """スロット結果から同じ掛け金で連続して回せるビュー"""
-
-    def __init__(self, bet: int):
-        super().__init__(timeout=600)
-        self.bet = bet
-
-    @discord.ui.button(label="🔁 もう一度回す（同じ掛け金）", style=discord.ButtonStyle.primary)
-    async def btn_again(self, interaction: discord.Interaction, button: discord.ui.Button):
-        u = _wallet(interaction.guild.id, interaction.user.id)
-        if self.bet > u["money"]:
-            await interaction.response.send_message(f"残高が足りません（残高: {fmt(u['money'])}）。ログインボーナスで受け取ってね。", ephemeral=True)
-            return
-        reels, pay, balance = _play_slot(interaction.guild.id, interaction.user.id, self.bet)
-        await interaction.response.edit_message(embed=_slot_embed(self.bet, reels, pay, balance), view=self)
-
-    @discord.ui.button(label="✏️ 掛け金を変える", style=discord.ButtonStyle.secondary)
-    async def btn_change(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BetModal("slot"))
+# ---------------- 設置済みパネルの自動更新 ----------------
+_panels_refreshed = False
 
 
-class BetModal(discord.ui.Modal, title="掛け金を入力"):
-    bet = discord.ui.TextInput(label="掛け金（$）", placeholder="例: 1000", max_length=10)
-
-    def __init__(self, game: str):
-        super().__init__()
-        self.game = game
-
-    async def on_submit(self, interaction: discord.Interaction):
-        amount = _parse_bet(self.bet.value)
-        if amount is None:
-            await interaction.response.send_message("掛け金は数字で入力してね。", ephemeral=True)
-            return
-        u = _wallet(interaction.guild.id, interaction.user.id)
-        if amount < MIN_BET:
-            await interaction.response.send_message(f"最小掛け金は {fmt(MIN_BET)} だよ。", ephemeral=True)
-            return
-        if amount > u["money"]:
-            await interaction.response.send_message(f"残高が足りません（残高: {fmt(u['money'])}）。ログインボーナスで受け取ってね。", ephemeral=True)
-            return
-        if self.game == "slot":
-            reels, pay, balance = _play_slot(interaction.guild.id, interaction.user.id, amount)
-            await interaction.response.send_message(embed=_slot_embed(amount, reels, pay, balance), view=SlotAgainView(amount), ephemeral=True)
-        elif self.game == "baccarat":
-            await interaction.response.send_message(
-                f"掛け金 {fmt(amount)}。どっちに賭ける？",
-                view=BaccaratSideView(amount),
-                ephemeral=True,
-            )
-        elif self.game == "highlow":
-            u["money"] -= amount
-            users.save()
-            view = HighLowView(amount)
-            await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
-
-
-class MinesBetModal(discord.ui.Modal, title="マインズ: 掛け金と地雷の数"):
-    bet = discord.ui.TextInput(label="掛け金（$）", placeholder="例: 1000", max_length=10)
-    mines = discord.ui.TextInput(label="地雷の数（1〜19）", default="4", max_length=2)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        amount = _parse_bet(self.bet.value)
-        m = _parse_bet(self.mines.value)
-        if amount is None or m is None:
-            await interaction.response.send_message("数字で入力してね。", ephemeral=True)
-            return
-        if m < 1 or m > MINES_TILES - 1:
-            await interaction.response.send_message(f"地雷の数は1〜{MINES_TILES - 1}で指定してね。", ephemeral=True)
-            return
-        u = _wallet(interaction.guild.id, interaction.user.id)
-        if amount < MIN_BET:
-            await interaction.response.send_message(f"最小掛け金は {fmt(MIN_BET)} だよ。", ephemeral=True)
-            return
-        if amount > u["money"]:
-            await interaction.response.send_message(f"残高が足りません（残高: {fmt(u['money'])}）。ログインボーナスで受け取ってね。", ephemeral=True)
-            return
-        u["money"] -= amount
-        users.save()
-        view = MinesView(amount, m)
-        await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
-
-
-# ---------------- バカラ: サイド選択 ----------------
-class BaccaratSideView(discord.ui.View):
-    def __init__(self, bet: int):
-        super().__init__(timeout=180)
-        self.bet = bet
-
-    async def _play(self, interaction: discord.Interaction, side: str, side_label: str):
-        for child in self.children:
-            child.disabled = True
-        u = _wallet(interaction.guild.id, interaction.user.id)
-        if self.bet > u["money"]:
-            await interaction.response.edit_message(content="残高が足りなくなっています。", view=self)
-            return
-        u["money"] -= self.bet
-        player, banker = deal_baccarat()
-        winner = baccarat_winner(player, banker)
-        pay = baccarat_payout(self.bet, side, winner)
-        u["money"] += pay
-        users.save()
-        winner_label = {"player": "プレイヤー", "banker": "バンカー", "tie": "タイ"}[winner]
-        embed = discord.Embed(title="🃏 バカラ", color=discord.Color.green() if pay > self.bet else discord.Color.greyple())
-        embed.add_field(name=f"プレイヤー（{_hand_value(player)}）", value=" ".join(_card_text(c) for c in player), inline=False)
-        embed.add_field(name=f"バンカー（{_hand_value(banker)}）", value=" ".join(_card_text(c) for c in banker), inline=False)
-        if pay > self.bet:
-            result = f"🎉 **{winner_label}** の勝ち！ あなたは {side_label} に賭けて **{fmt(pay)}** 獲得（+{fmt(pay - self.bet)}）"
-        elif pay == self.bet and pay > 0:
-            result = f"**{winner_label}** で引き分け。掛け金 **{fmt(pay)}** が返金されました"
-        else:
-            result = f"**{winner_label}** の勝ち。あなたは {side_label} に賭けて **{fmt(self.bet)}** を失いました"
-        embed.add_field(name="結果", value=result, inline=False)
-        embed.add_field(name="残高", value=fmt(u["money"]), inline=False)
-        await interaction.response.edit_message(content=None, embed=embed, view=self)
-
-    @discord.ui.button(label="プレイヤー（×2.0）", style=discord.ButtonStyle.primary)
-    async def btn_player(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._play(interaction, "player", "プレイヤー")
-
-    @discord.ui.button(label="バンカー（×1.95）", style=discord.ButtonStyle.danger)
-    async def btn_banker(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._play(interaction, "banker", "バンカー")
-
-    @discord.ui.button(label="タイ（×8）", style=discord.ButtonStyle.success)
-    async def btn_tie(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._play(interaction, "tie", "タイ")
-
-
-# ---------------- マインズ ----------------
-class MinesView(discord.ui.View):
-    def __init__(self, bet: int, mines: int):
-        super().__init__(timeout=600)
-        self.bet = bet
-        self.mines = mines
-        self.mine_set = set(random.sample(range(MINES_TILES), mines))
-        self.revealed = set()
-        self.finished = False
-        self.tile_buttons = []
-        for idx in range(MINES_TILES):
-            b = discord.ui.Button(label="❔", style=discord.ButtonStyle.secondary, row=idx // 5)
-            b.callback = self._make_tile_cb(idx)
-            self.tile_buttons.append(b)
-            self.add_item(b)
-        self.cash_btn = discord.ui.Button(label="💰 キャッシュアウト（返金）", style=discord.ButtonStyle.success, row=4)
-        self.cash_btn.callback = self._cashout
-        self.add_item(self.cash_btn)
-
-    def _cashout_amount(self) -> int:
-        return int(self.bet * mines_multiplier(MINES_TILES, self.mines, len(self.revealed)))
-
-    def build_embed(self, end_text: str = None) -> discord.Embed:
-        embed = discord.Embed(title="💣 マインズ", color=discord.Color.orange())
-        mult = mines_multiplier(MINES_TILES, self.mines, len(self.revealed))
-        embed.description = (
-            f"地雷 {self.mines} 個 / 全 {MINES_TILES} マス。マスを開けるたび倍率アップ、地雷で全没収。\n"
-            f"開けたマス: {len(self.revealed)} / 現在の倍率: ×{mult:.2f} / キャッシュアウト額: **{fmt(self._cashout_amount())}**"
-        )
-        embed.add_field(name="掛け金", value=fmt(self.bet), inline=False)
-        if end_text:
-            embed.add_field(name="結果", value=end_text, inline=False)
-        return embed
-
-    def _reveal_all(self):
-        for idx, b in enumerate(self.tile_buttons):
-            b.disabled = True
-            if idx in self.mine_set:
-                b.label = "💣"
-                b.style = discord.ButtonStyle.danger
-            elif idx in self.revealed:
-                b.label = "💎"
-            else:
-                b.label = "・"
-        self.cash_btn.disabled = True
-
-    def _make_tile_cb(self, idx: int):
-        async def _cb(interaction: discord.Interaction):
-            if self.finished:
-                await interaction.response.defer()
-                return
-            if idx in self.mine_set:
-                self.finished = True
-                self._reveal_all()
-                u = _wallet(interaction.guild.id, interaction.user.id)
-                embed = self.build_embed(f"💥 地雷を踏みました… **{fmt(self.bet)}** 没収。残高: {fmt(u['money'])}")
-                embed.color = discord.Color.red()
-                await interaction.response.edit_message(embed=embed, view=self)
-                return
-            self.revealed.add(idx)
-            b = self.tile_buttons[idx]
-            b.label = "💎"
-            b.style = discord.ButtonStyle.primary
-            b.disabled = True
-            amount = self._cashout_amount()
-            self.cash_btn.label = f"💰 キャッシュアウト {fmt(amount)}"
-            await interaction.response.edit_message(embed=self.build_embed(), view=self)
-        return _cb
-
-    async def _cashout(self, interaction: discord.Interaction):
-        if self.finished:
-            await interaction.response.defer()
-            return
-        self.finished = True
-        amount = self._cashout_amount()
-        u = _wallet(interaction.guild.id, interaction.user.id)
-        u["money"] += amount
-        users.save()
-        self._reveal_all()
-        profit = amount - self.bet
-        if profit > 0:
-            text = f"🎉 **{fmt(amount)}** をキャッシュアウト（+{fmt(profit)}）！ 残高: {fmt(u['money'])}"
-        else:
-            text = f"掛け金 **{fmt(amount)}** をそのまま回収しました。残高: {fmt(u['money'])}"
-        embed = self.build_embed(text)
-        embed.color = discord.Color.green()
-        await interaction.response.edit_message(embed=embed, view=self)
-
-
-# ---------------- カジノパネル ----------------
-class CasinoPanelView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="💰 ログインボーナス $5,000", style=discord.ButtonStyle.success, custom_id="casino_bonus", row=0)
-    async def btn_bonus(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await _guard(interaction):
-            return
-        u = _wallet(interaction.guild.id, interaction.user.id)
-        if u["login_bonus_date"] == _today():
-            await interaction.response.send_message("今日のログインボーナスはもう受け取り済みだよ。明日（日本時間0時〜）また押してね。", ephemeral=True)
-            return
-        u["login_bonus_date"] = _today()
-        u["money"] += LOGIN_BONUS
-        users.save()
-        await interaction.response.send_message(f"💰 ログインボーナス **{fmt(LOGIN_BONUS)}** を受け取りました！ 残高: {fmt(u['money'])}", ephemeral=True)
-
-    @discord.ui.button(label="👛 残高", style=discord.ButtonStyle.secondary, custom_id="casino_balance", row=0)
-    async def btn_balance(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await _guard(interaction):
-            return
-        u = _wallet(interaction.guild.id, interaction.user.id)
-        bonus = "受け取り済み" if u["login_bonus_date"] == _today() else "まだ受け取れます"
-        await interaction.response.send_message(f"👛 {interaction.user.display_name} の残高は **{fmt(u['money'])}** です。\n今日のログインボーナス: {bonus}", ephemeral=True)
-
-    @discord.ui.button(label="🏆 ランキング", style=discord.ButtonStyle.secondary, custom_id="casino_rank", row=0)
-    async def btn_rank(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await _guard(interaction):
-            return
-        rows = []
-        for uid, rec in users.guild_users(interaction.guild.id).items():
-            rows.append((int(uid), rec.get("money", 0)))
-        rows.sort(key=lambda x: x[1], reverse=True)
-        lines = ["**🏆 ポイント（$）ランキング**"]
-        if not rows:
-            lines.append("まだデータがありません。")
-        for i, (uid, money) in enumerate(rows[:10], 1):
-            member = interaction.guild.get_member(uid)
-            name = member.display_name if member else f"ユーザー {uid}"
-            lines.append(f"{i}. {name} … **{fmt(money)}**")
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
-
-    @discord.ui.button(label="🎰 スロット", style=discord.ButtonStyle.primary, custom_id="casino_slot", row=1)
-    async def btn_slot(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await _guard(interaction):
-            return
-        await interaction.response.send_modal(BetModal("slot"))
-
-    @discord.ui.button(label="🃏 バカラ", style=discord.ButtonStyle.primary, custom_id="casino_baccarat", row=1)
-    async def btn_baccarat(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await _guard(interaction):
-            return
-        await interaction.response.send_modal(BetModal("baccarat"))
-
-    @discord.ui.button(label="🔼 ハイアンドロー", style=discord.ButtonStyle.primary, custom_id="casino_highlow", row=2)
-    async def btn_highlow(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await _guard(interaction):
-            return
-        await interaction.response.send_modal(BetModal("highlow"))
-
-    @discord.ui.button(label="💣 マインズ", style=discord.ButtonStyle.primary, custom_id="casino_mines", row=2)
-    async def btn_mines(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await _guard(interaction):
-            return
-        await interaction.response.send_modal(MinesBetModal())
+@bot.listen("on_ready")
+async def _refresh_casino_panels():
+    """起動時に、設置済みパネルを最新メニューで編集し直す。
+    新しいゲーム等を追加して再デプロイしたとき、既存パネルへ自動反映するための処理。"""
+    global _panels_refreshed
+    if _panels_refreshed:
+        return
+    _panels_refreshed = True
+    for gid_str in list(store.configs.keys()):
+        try:
+            cfg = store.cfg(int(gid_str))
+            panel = cfg.get("panels", {}).get("casino")
+            if not panel:
+                continue
+            channel = bot.get_channel(panel["channel_id"])
+            if channel is None:
+                channel = await bot.fetch_channel(panel["channel_id"])
+            message = await channel.fetch_message(panel["message_id"])
+            await message.edit(embed=build_panel_embed(), view=CasinoPanelView())
+        except Exception:
+            pass  # パネルが消えている・権限がない等は無視（/setup_casino で再設置できる）
 
 
 @bot.tree.command(name="setup_casino", description="このチャンネルにカジノパネルを設置する（管理者用）")
 @requires(administrator=True)
 async def cmd_setup_casino(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🎰 カジノ",
-        description=(
-            "ボタンから遊べます。通貨は **$**、掛け金は押した後の入力式（最小 $10）です。\n"
-            "💰 ログインボーナスは1日1回 **$5,000**。まずはこれを受け取ってから遊んでね。"
-        ),
-        color=discord.Color.gold(),
+    cfg = store.cfg(interaction.guild.id)
+    # 以前の設置があれば消してから設置し直す（パネルの二重残りを防ぐ）
+    old = cfg.get("panels", {}).get("casino")
+    if old:
+        try:
+            old_ch = interaction.guild.get_channel(old["channel_id"])
+            if old_ch is not None:
+                old_msg = await old_ch.fetch_message(old["message_id"])
+                await old_msg.delete()
+        except Exception:
+            pass
+    msg = await interaction.channel.send(embed=build_panel_embed(), view=CasinoPanelView())
+    cfg.setdefault("panels", {})["casino"] = {"channel_id": interaction.channel.id, "message_id": msg.id}
+    store.save_config()
+    await interaction.response.send_message(
+        "✅ カジノパネルを設置しました。今後ゲームが追加されたときは、このパネルにも自動で反映されます。",
+        ephemeral=True,
     )
-    embed.add_field(name="🎰 スロット", value="リール3つを回します。3つ揃い: 🍒×4 / 🍋×6 / 🔔×10 / ⭐×15 / 💎×25 / 7️⃣×50。どれか2つ一致でも×1.2。当たっても外れても、そのまま同じ掛け金で連続で回せます。", inline=False)
-    embed.add_field(name="🃏 バカラ", value="プレイヤー / バンカー / タイ のどれに賭けるか選びます。カードの合計の下1桁が9に近い方の勝ち（3枚目のルールは正式式）。配当: プレイヤー×2.0 / バンカー×1.95 / タイ×8。タイのとき、プレイヤー・バンカーへの賭けは返金されます。", inline=False)
-    embed.add_field(name="🔼 ハイアンドロー", value="次のカードが今のカードより高いか低いかを当てる連続ゲーム。当てるたびに倍率が上がり（倍率はカードによって変動）、好きなところで「やめる」を押すとその額が確定します。外れたら掛け金は没収。同数はノーカウントで継続。", inline=False)
-    embed.add_field(name="💣 マインズ", value="20マスの中に地雷が1〜19個（数は自分で指定）。マスを開けるたびに倍率が上がり、好きなところでキャッシュアウトして確定できます。地雷を踏んだら掛け金は没収です。", inline=False)
-    await interaction.channel.send(embed=embed, view=CasinoPanelView())
-    await interaction.response.send_message("✅ カジノパネルを設置しました。", ephemeral=True)
 
 
 # ---------------- オーナー専用: お金の増減 ----------------
