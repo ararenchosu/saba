@@ -1518,6 +1518,7 @@ class AccountRecord:
         self.vip_tally: collections.Counter = collections.Counter()   # 引いた妖怪（vip_tally）
         self.coin_gacha_ok: bool | None = None
         self.coin_gacha_text: str | None = None
+        self.present_text: str | None = None
 
 
 def find_auth_token(html: str) -> str | None:
@@ -1942,6 +1943,25 @@ async def make_coin_gacha_account(rec: AccountRecord, progress):
         await progress(f'⚠ 第1章の進行に失敗: `{rec.clear_error[:150]}`')
         return
 
+    await progress('📮 ステージ報酬などの郵便を受け取っています...')
+    try:
+        presents = await asyncio.to_thread(c.receive_presents)
+        if presents:
+            rec.present_text = '\n'.join(
+                f'{(present.get("bodyText") or "報酬").splitlines()[0][:40]}'
+                f'（種類 {present.get("distItemType")}・ID {present.get("distItemId")} '
+                f'×{present.get("distItemCnt")}）'
+                for present in presents
+            )
+            await progress(f'📮 郵便から{len(presents)}件の報酬を受け取りました')
+        else:
+            rec.present_text = '受取可能な郵便はありませんでした'
+            await progress('ℹ 受取可能な郵便はありませんでした')
+    except Exception as e:
+        rec.present_text = f'受け取りに失敗しました: {str(e)[:180]}'
+        log_line(f'初期垢の郵便受け取りに失敗 {rec.email}: {str(e)[:180]}')
+        await progress(f'⚠ 郵便の受け取りに失敗: `{str(e)[:150]}`')
+
     await progress('🎰 所持コインをすべて使ってガチャを引いています...')
     try:
         coins = await asyncio.to_thread(c.coin_list)
@@ -2067,8 +2087,10 @@ def accounts_txt(records: list[AccountRecord], started_at: datetime,
         tail = ['', '=' * 56, '第1章1〜15面・コインガチャ結果', '=' * 56]
         for r in records:
             stage_status = '完了' if r.cleared else f'失敗: {r.clear_error or "不明"}'
+            present_status = r.present_text or '受け取り結果なし'
             gacha_status = r.coin_gacha_text or '実行結果なし'
             tail += ['', r.email, f'ステージ進行: {stage_status}']
+            tail += [f'郵便受け取り: {line}' for line in present_status.splitlines()]
             tail += [f'  {line}' for line in gacha_status.splitlines()]
         tail.append('')
     return '\n'.join(head + [f'{r.email}:{r.password}' for r in records] + [''] + tail)
