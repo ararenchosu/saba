@@ -17,6 +17,13 @@ from rpgbot.core import bot, TOKEN, requires
 from rpgbot import rpg  # noqa: F401  （コマンド・イベント登録のため import）
 from rpgbot.rpg import RpgPanelView
 
+# ---- 二重読み込み対策 ----
+# 起動側でこのファイルが万一2回実行されても、コマンドの二重登録エラーで
+# 落ちないようにする（先に登録された分を外してから登録し直す）。
+for _dup_name in ("botinfo",):
+    if bot.tree.get_command(_dup_name) is not None:
+        bot.tree.remove_command(_dup_name)
+
 # ===== スマホ表示パッチ（他のBOTと同一） =====
 def _apply_mobile_status_patch() -> None:
     try:
