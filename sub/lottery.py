@@ -725,6 +725,7 @@ class _SymbolModal(discord.ui.Modal):
 
 class _LimitsModal(discord.ui.Modal, title="スクラッチ：口数・上限"):
     def __init__(self, per_user: int, cap: int):
+        super().__init__(title="スクラッチ：口数・上限")
         self.per_user_in = discord.ui.TextInput(label="1人の口数上限", default=str(per_user), max_length=5)
         self.cap_in = discord.ui.TextInput(label="全体の上限枚数（在庫）", default=str(cap), max_length=6)
         self.add_item(self.per_user_in)
