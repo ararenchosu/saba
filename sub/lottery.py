@@ -17,6 +17,8 @@ sub/lottery.py — 宝くじ（サブBOT専用）【専用パネル版】
      盤面は「結果を先に決めてから生成」するので還元率を制御できる。
 - 設定の変更はパネルの「⚙️ 設定」ボタンから（サーバーオーナーと管理者のみ。
   許可ユーザーは含まない）。カジノの倍率設定と同じ権限ルール。
+- 開催状態: 初期は両形式とも「未開催」で買えない。管理者が設定後に
+  「開催する」で販売開始。抽選くじは抽選・キャンセルで自動的に未開催へ戻る。
 """
 
 import random
@@ -90,6 +92,7 @@ def _lot(guild_id: int) -> dict:
     tiers = d.setdefault("tiers", [list(t) for t in DRAW_DEFAULT_TIERS])
     while len(tiers) < 5:
         tiers.append([0, 0])
+    d.setdefault("open", False)  # 開催中かどうか（初期は未開催。管理者が設定後に開催する）
     d.setdefault("end", "")
     d.setdefault("round", 1)
     d.setdefault("tickets", [])
@@ -99,6 +102,7 @@ def _lot(guild_id: int) -> dict:
     prizes = s.setdefault("prizes", dict(SCRATCH_DEFAULT_PRIZES))
     for sym, p in SCRATCH_DEFAULT_PRIZES.items():
         prizes.setdefault(sym, p)
+    s.setdefault("open", False)  # 開催中かどうか（初期は未開催）
     s.setdefault("per_user", SCRATCH_DEFAULT_PER_USER)
     s.setdefault("cap", SCRATCH_DEFAULT_CAP)
     s.setdefault("sold", 0)
@@ -179,13 +183,17 @@ def build_lottery_embed(guild_id: int) -> discord.Embed:
     for i, (prize, winners) in enumerate(d["tiers"][:5], 1):
         if prize > 0 and winners > 0:
             tier_lines.append(f"{i}等 {fmt(prize)} × {winners}口")
-    embed.add_field(
-        name=f"🎫 抽選くじ（第{d['round']}回）",
-        value=(
+    if d["open"]:
+        draw_value = (
             f"1口 **{fmt(d['price'])}** ／ 販売 {len(tickets)}口（参加 {people}人）\n"
             f"締切: {end_line}\n"
             f"賞金: {' ／ '.join(tier_lines) if tier_lines else '未設定'}"
-        ),
+        )
+    else:
+        draw_value = "⏸ **現在は未開催です**（次回の開催をお待ちください）"
+    embed.add_field(
+        name=f"🎫 抽選くじ（第{d['round']}回）",
+        value=draw_value,
         inline=False,
     )
     if d.get("last_result"):
@@ -193,13 +201,17 @@ def build_lottery_embed(guild_id: int) -> discord.Embed:
     # スクラッチ形式
     remain = max(0, s["cap"] - s["sold"])
     prize_lines = [f"{sym} {fmt(s['prizes'].get(sym, 0))}（{_hit_rate_text(sym)}）" for sym in SCRATCH_SYMBOLS]
-    embed.add_field(
-        name=f"✨ スクラッチ（第{s['batch']}弾）",
-        value=(
+    if s["open"]:
+        scratch_value = (
             f"1口 **{fmt(s['price'])}** ／ 残り {remain}口（全{s['cap']}口・1人{s['per_user']}口まで）\n"
             "3×3をめくって1列そろえば当選！\n"
             f"賞金: {' ／ '.join(prize_lines)}"
-        ),
+        )
+    else:
+        scratch_value = "⏸ **現在は未開催です**（次回の開催をお待ちください）"
+    embed.add_field(
+        name=f"✨ スクラッチ（第{s['batch']}弾）",
+        value=scratch_value,
         inline=False,
     )
     embed.set_footer(text="設定の変更は「⚙️ 設定」ボタンから（オーナー・管理者専用）")
@@ -258,6 +270,7 @@ async def _run_draw(guild: discord.Guild, *, manual: bool = False) -> str:
     d["tickets"] = []
     d["round"] += 1
     d["end"] = ""
+    d["open"] = False  # 抽選が終わったら未開催に戻る（次回は管理者が開催する）
     store.save_config()
     # 結果をパネルのチャンネルへ投稿
     cfg = store.cfg(guild.id)
@@ -288,6 +301,7 @@ async def _cancel_draw(guild: discord.Guild) -> int:
         total += refund
     d["tickets"] = []
     d["end"] = ""
+    d["open"] = False
     d["round"] += 1
     d["last_result"] = f"第{d['round'] - 1}回はキャンセルされました（全員へ返金済み）"
     store.save_config()
@@ -302,6 +316,9 @@ class DrawBuyModal(discord.ui.Modal, title="抽選くじを買う"):
     async def on_submit(self, interaction: discord.Interaction):
         lot = _lot(interaction.guild.id)
         d = lot["draw"]
+        if not d["open"]:
+            await interaction.response.send_message("⏸ 抽選くじは現在未開催です。", ephemeral=True)
+            return
         try:
             n = int(str(self.count.value).strip())
         except ValueError:
@@ -487,6 +504,9 @@ class LotteryPanelView(discord.ui.View):
     async def buy_draw(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _guard(interaction):
             return
+        if not _lot(interaction.guild.id)["draw"]["open"]:
+            await interaction.response.send_message("⏸ 抽選くじは現在未開催です。開催をお待ちください。", ephemeral=True)
+            return
         await interaction.response.send_modal(DrawBuyModal())
 
     @discord.ui.button(label="スクラッチを買う", emoji="✨", style=discord.ButtonStyle.success, custom_id="lottery:buy_scratch", row=0)
@@ -496,6 +516,9 @@ class LotteryPanelView(discord.ui.View):
         gid, uid = interaction.guild.id, interaction.user.id
         lot = _lot(gid)
         s = lot["scratch"]
+        if not s["open"]:
+            await interaction.response.send_message("⏸ スクラッチは現在未開催です。開催をお待ちください。", ephemeral=True)
+            return
         if s["sold"] >= s["cap"]:
             await interaction.response.send_message("この弾は売り切れです。次の弾をお待ちください。", ephemeral=True)
             return
@@ -564,12 +587,12 @@ def _admin_embed(guild_id: int) -> discord.Embed:
     sp = " ／ ".join(f"{sym} {fmt(s['prizes'].get(sym, 0))}" for sym in SCRATCH_SYMBOLS)
     embed = discord.Embed(title="⚙️ 宝くじ設定（オーナー・管理者専用）", color=discord.Color.blurple())
     embed.add_field(name="🎫 抽選くじ", value=(
-        f"1口: {fmt(d['price'])} ／ 第{d['round']}回 ／ 販売 {len(d['tickets'])}口\n"
+        f"状態: {'🟢 開催中' if d['open'] else '⏸ 未開催'} ／ 1口: {fmt(d['price'])} ／ 第{d['round']}回 ／ 販売 {len(d['tickets'])}口\n"
         f"賞金: {tiers}\n"
         f"終了時期: {end.strftime('%Y-%m-%d %H:%M') if end else '未設定'}"
     ), inline=False)
     embed.add_field(name="✨ スクラッチ", value=(
-        f"1口: {fmt(s['price'])} ／ 第{s['batch']}弾 ／ 販売 {s['sold']}/{s['cap']}口 ／ 1人上限 {s['per_user']}口\n"
+        f"状態: {'🟢 開催中' if s['open'] else '⏸ 未開催'} ／ 1口: {fmt(s['price'])} ／ 第{s['batch']}弾 ／ 販売 {s['sold']}/{s['cap']}口 ／ 1人上限 {s['per_user']}口\n"
         f"賞金: {sp}"
     ), inline=False)
     embed.set_footer(text="下のメニューから変更する項目を選んでください")
@@ -769,11 +792,13 @@ class LotteryAdminView(discord.ui.View):
         sel = discord.ui.Select(
             placeholder="変更する項目を選んでください",
             options=[
+                discord.SelectOption(label="抽選：開催する／終了する", value="draw_toggle", emoji="🎫"),
                 discord.SelectOption(label="抽選：1口の料金", value="draw_price", emoji="🎫"),
                 discord.SelectOption(label="抽選：等級の賞金・当選口数", value="draw_tier", emoji="🏆"),
                 discord.SelectOption(label="抽選：終了時期", value="draw_end", emoji="⏰"),
                 discord.SelectOption(label="抽選：今すぐ抽選する", value="draw_now", emoji="🎲"),
                 discord.SelectOption(label="抽選：回をキャンセルして返金", value="draw_cancel", emoji="↩️"),
+                discord.SelectOption(label="スクラッチ：開催する／終了する", value="scratch_toggle", emoji="✨"),
                 discord.SelectOption(label="スクラッチ：1口の料金", value="scratch_price", emoji="✨"),
                 discord.SelectOption(label="スクラッチ：絵柄の賞金", value="scratch_prize", emoji="💎"),
                 discord.SelectOption(label="スクラッチ：口数・全体上限", value="scratch_limits", emoji="🔢"),
@@ -790,7 +815,41 @@ class LotteryAdminView(discord.ui.View):
         v = interaction.data["values"][0]
         gid = interaction.guild.id
         lot = _lot(gid)
-        if v == "draw_price":
+        if v == "draw_toggle":
+            if lot["draw"]["open"]:
+                if lot["draw"]["tickets"]:
+                    await interaction.response.send_message(
+                        "チケットが販売済みのため、そのまま終了はできません。「今すぐ抽選する」か「キャンセルして返金」で締めてください。",
+                        ephemeral=True)
+                else:
+                    lot["draw"]["open"] = False
+                    store.save_config()
+                    await interaction.response.send_message("⏸ 抽選くじを未開催にしました。", ephemeral=True)
+                    await _refresh_panel(gid)
+            else:
+                lot["draw"]["open"] = True
+                store.save_config()
+                await interaction.response.send_message(
+                    f"▶️ 第{lot['draw']['round']}回を開催しました。チケット販売中です"
+                    + ("。" if not _end_dt(lot["draw"]) else f"（締切: {_end_dt(lot['draw']).strftime('%Y-%m-%d %H:%M')}）"),
+                    ephemeral=True)
+                await _refresh_panel(gid)
+        elif v == "scratch_toggle":
+            if lot["scratch"]["open"]:
+                lot["scratch"]["open"] = False
+                store.save_config()
+                await interaction.response.send_message("⏸ スクラッチを未開催にしました。", ephemeral=True)
+                await _refresh_panel(gid)
+            elif lot["scratch"]["sold"] >= lot["scratch"]["cap"]:
+                await interaction.response.send_message(
+                    "在庫が売り切れのままです。先に「在庫リセット（次の弾へ）」をしてから開催してください。", ephemeral=True)
+            else:
+                lot["scratch"]["open"] = True
+                store.save_config()
+                await interaction.response.send_message(
+                    f"▶️ スクラッチ第{lot['scratch']['batch']}弾を開催しました。", ephemeral=True)
+                await _refresh_panel(gid)
+        elif v == "draw_price":
             await interaction.response.send_modal(_PriceModal("draw", lot["draw"]["price"]))
         elif v == "scratch_price":
             await interaction.response.send_modal(_PriceModal("scratch", lot["scratch"]["price"]))
