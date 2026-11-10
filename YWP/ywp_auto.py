@@ -2078,6 +2078,9 @@ class Client:
         table = j.get('ywp_mst_gacha')
         if j.get('resultCode') != 0 or not table:
             raise RuntimeError(f'ガチャ画面を開けませんでした（rc={j.get("resultCode")}）')
+        for key in ('ywp_user_item', 'ywp_user_data'):
+            if j.get(key) is not None:
+                self.save[key] = j[key]
         owned = self.items()
         names = {r[0]: r[2] for r in self.master_table('ywp_mst_item') if len(r) > 2}
         return [(int(coin), int(gid), owned[int(coin)], names.get(coin, coin))

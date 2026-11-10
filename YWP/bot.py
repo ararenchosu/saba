@@ -1962,6 +1962,15 @@ async def make_coin_gacha_account(rec: AccountRecord, progress):
         log_line(f'初期垢の郵便受け取りに失敗 {rec.email}: {str(e)[:180]}')
         await progress(f'⚠ 郵便の受け取りに失敗: `{str(e)[:150]}`')
 
+    await progress('🔄 郵便受取後の所持数を更新しています...')
+    try:
+        await asyncio.to_thread(c.refresh)
+    except Exception as e:
+        rec.coin_gacha_ok = False
+        rec.coin_gacha_text = f'最新の所持数を取得できず、ガチャを中止しました: {str(e)[:150]}'
+        await progress(f'⚠ 所持数の更新に失敗したため、コインガチャを中止: `{str(e)[:120]}`')
+        return
+
     await progress('🎰 所持コインをすべて使ってガチャを引いています...')
     try:
         coins = await asyncio.to_thread(c.coin_list)
