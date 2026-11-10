@@ -5,6 +5,7 @@ sub/bot.py — サブBOT（本格用）の本体
 コマンド登録・起動時のパネル復旧・スラッシュコマンド同期を担当。
 実際の起動はランチャー main.py から start() が呼ばれて行われます。
 機能モジュールはこの sub/ フォルダ内の各モジュール。トークンは SUB_DISCORD_TOKEN。
+print("### sub/bot.py 実行マーカー ###", flush=True)
 """
 
 import time
