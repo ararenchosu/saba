@@ -5,7 +5,6 @@ sub/bot.py — サブBOT（本格用）の本体
 コマンド登録・起動時のパネル復旧・スラッシュコマンド同期を担当。
 実際の起動はランチャー main.py から start() が呼ばれて行われます。
 機能モジュールはこの sub/ フォルダ内の各モジュール。トークンは SUB_DISCORD_TOKEN。
-print("### sub/bot.py 実行マーカー ###", flush=True)
 """
 
 import time
@@ -37,6 +36,13 @@ from sub.casino import CasinoPanelView
 from sub.lottery import LotteryPanelView
 from sub.utility import PollView, GiveawayView, utility_loop
 from sub.userdata import utility as utility_store
+
+# ---- 二重読み込み対策 ----
+# 起動側でこのファイルが万一2回実行されても、コマンドの二重登録エラーで
+# 落ちないようにする（先に登録された分を外してから登録し直す）。
+for _dup_name in ("bothelp", "botinfo"):
+    if bot.tree.get_command(_dup_name) is not None:
+        bot.tree.remove_command(_dup_name)
 
 # ===== スマホ表示パッチ（接続種別をモバイルに寄せる） =====
 # 接続時の自己申告（identify の properties）を Discord iOS に書き換えて、
