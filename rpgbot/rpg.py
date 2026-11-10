@@ -6,7 +6,10 @@ rpgbot/rpg.py — 簡易RPG（専用BOT）【カジノ$連動・専用パネル�
 - /setup_rpg で専用パネルを設置。パネルから「冒険（ステージ戦闘）」「チーム編成」
   「仲間ガチャ」「ステータス」をすべて操作するターン制RPG。
 - 通貨はカジノと同じ $（users.json の money 共用）。仲間はガチャで集める
-  （1回 $500 / 10連 $5,000、10連はSR以上1人確定）。被りは凸（+10%/凸、上限5）。
+  （1回 $500 / 10連 $5,000、10連はSR以上1人確定）。被りは必殺技Lv（上限5）が
+  先に上がり、技LvMAX後の被りは凸（+10%/凸、上限10）。全部MAXの被りは $ 変換。
+- 編成: 手動（属性で絞り込み可）＋自動編成（バランス/ステージ相性/属性優先）。
+  ステージ開始前にも「今の編成で出発 / 自動編成して出発」を選べる。
 - 初回はスターター3人（剣士/ヒーラー/タンク）を自動で配布する。
 - 戦闘: 味方3人と敵が順番に行動するターン制。ボタンで 攻撃/スキル/防御/回復薬。
   属性相性（火>木>水>火、光と闇は相互に強い）と役割（アタッカー/魔法使い/
@@ -28,7 +31,8 @@ JST = timezone(timedelta(hours=9))
 
 GACHA_COST = 500
 GACHA10_COST = 5000
-MAX_DUP = 5
+MAX_SKILL = 5
+MAX_DUP = 10
 POTIONS_PER_BATTLE = 3
 
 ELEMENT_EMOJI = {"火": "🔥", "水": "💧", "木": "🌿", "光": "⚡", "闇": "🌑"}
@@ -44,21 +48,38 @@ SKILL_CD = {"attacker": 3, "mage": 3, "healer": 4, "tank": 4, "support": 4}
 
 # id: (名前, 絵文字, 属性, 役割, レア, HP, ATK, DEF)
 UNITS = {
-    # SSR
-    "shion":   ("影の暗殺者シオン", "🥷", "闇", "attacker", "SSR", 180, 68, 14),
-    "lumina":  ("光の聖女ルミナ", "👼", "光", "healer", "SSR", 170, 48, 14),
-    "ignis":   ("炎の魔王女イグニス", "😈", "火", "mage", "SSR", 160, 72, 10),
-    # SR
-    "kaen":    ("炎の剣士カエン", "🗡️", "火", "attacker", "SR", 170, 48, 12),
-    "aqua":    ("水の騎士アクア", "🛡️", "水", "tank", "SR", 280, 34, 22),
-    "silva":   ("木の守護者シルバ", "🌳", "木", "tank", "SR", 320, 30, 26),
-    "laila":   ("光の魔法使いライラ", "🔮", "光", "mage", "SR", 140, 52, 10),
-    "marine":  ("水の歌姫マリン", "🎤", "水", "support", "SR", 150, 36, 12),
-    # R
+    # ===== SSR =====
+    "nobunaga":   ("織田信長", "🏯", "火", "attacker", "SSR", 178, 67, 13),
+    "poseidon":   ("ポセイドン", "🔱", "水", "mage", "SSR", 158, 74, 10),
+    "heracles":   ("ヘラクレス", "💪", "木", "tank", "SSR", 335, 37, 27),
+    "amaterasu":  ("アマテラス", "☀️", "光", "support", "SSR", 168, 43, 13),
+    "persephone": ("ペルセポネ", "🌹", "闇", "healer", "SSR", 176, 50, 14),
+    # ===== SR =====
+    "agni":        ("アグニ", "🔥", "火", "mage", "SR", 146, 56, 10),
+    "hephaestus":  ("ヘパイストス", "🔨", "火", "tank", "SR", 298, 33, 24),
+    "musashi":     ("宮本武蔵", "⚔️", "水", "attacker", "SR", 170, 51, 12),
+    "genbu":       ("玄武", "🐢", "水", "tank", "SR", 305, 31, 25),
+    "titania":     ("ティターニア", "🧚", "木", "mage", "SR", 144, 55, 10),
+    "pan":         ("パン", "🐐", "木", "support", "SR", 152, 38, 12),
+    "arthur":      ("アーサー王", "⚜️", "光", "attacker", "SR", 172, 52, 12),
+    "nightingale": ("ナイチンゲール", "🩺", "光", "healer", "SR", 152, 41, 12),
+    "lucifer":     ("ルシファー", "😈", "闇", "attacker", "SR", 166, 54, 11),
+    "hades":       ("ハデス", "💀", "闇", "mage", "SR", 148, 57, 10),
+    # ===== R =====
+    "phoenix":    ("フェニックス", "🐦", "火", "healer", "R", 128, 29, 9),
+    "salamander": ("サラマンダー", "🦎", "火", "support", "R", 136, 30, 10),
+    "otohime":    ("乙姫", "🐚", "水", "healer", "R", 126, 28, 9),
+    "seiren":     ("セイレーン", "🎵", "水", "support", "R", 134, 31, 10),
+    "robin":      ("ロビン・フッド", "🏹", "木", "attacker", "R", 148, 37, 10),
+    "flora":      ("フローラ", "🌸", "木", "healer", "R", 124, 28, 9),
+    "gabriel":    ("ガブリエル", "🎺", "光", "mage", "R", 132, 43, 9),
+    "lancelot":   ("ランスロット", "🛡️", "光", "tank", "R", 242, 27, 17),
+    "anubis":     ("アヌビス", "🐺", "闇", "tank", "R", 238, 26, 18),
+    "dakki":      ("妲己", "🦊", "闇", "support", "R", 136, 32, 10),
+    # ===== スターター（配布専用も兼ねるR） =====
     "taro":    ("村の剣士タロウ", "⚔️", "火", "attacker", "R", 150, 34, 10),
     "mint":    ("見習いヒーラーミント", "🌱", "水", "healer", "R", 120, 26, 8),
     "gonta":   ("木こりゴンタ", "🪓", "木", "tank", "R", 230, 24, 16),
-    "kurou":   ("影の盗賊クロウ", "🐦‍⬛", "闇", "attacker", "R", 130, 40, 8),
 }
 STARTERS = ["taro", "mint", "gonta"]
 GACHA_RATES = {"SSR": 3, "SR": 17, "R": 80}  # %
@@ -109,9 +130,17 @@ def _rpg(gid: int, uid: int) -> dict:
     r.setdefault("cleared", 0)
     if not r["units"]:
         for sid in STARTERS:
-            r["units"][sid] = {"lv": 1, "exp": 0, "dup": 0}
+            r["units"][sid] = {"lv": 1, "exp": 0, "dup": 0, "skill": 1}
         r["party"] = list(STARTERS)
         users.save()
+    # ロスター変更で消えたユニットを掃除し、技Lvの初期値を補う
+    for _uid in list(r["units"]):
+        if _uid not in UNITS:
+            del r["units"][_uid]
+    r["party"] = [p for p in r["party"] if p in r["units"]]
+    for _rec in r["units"].values():
+        _rec.setdefault("skill", 1)
+        _rec.setdefault("dup", 0)
     return r
 
 
@@ -122,12 +151,24 @@ def unit_stats(unit_id: str, rec: dict):
     return int(hp * mult), int(atk * mult), int(dfn * mult)
 
 
+def skill_mult(rec: dict) -> float:
+    """必殺技Lvによる技の効果倍率（Lv1=1.0 → Lv5=2.0）"""
+    return 1 + 0.25 * (rec.get("skill", 1) - 1)
+
+
+def unit_power(unit_id: str, rec: dict) -> int:
+    """編成の目安になる戦力スコア（自動編成の評価にも使う）"""
+    hp, atk, dfn = unit_stats(unit_id, rec)
+    return hp // 5 + atk + dfn
+
+
 def unit_line(unit_id: str, rec: dict) -> str:
     name, emoji, elem, role, rarity, *_ = UNITS[unit_id]
     hp, atk, dfn = unit_stats(unit_id, rec)
     dup = rec.get("dup", 0)
     return (f"{emoji} **{name}** [{rarity}] {ELEMENT_EMOJI[elem]}{elem}・{ROLE_NAME[role]} "
-            f"Lv{rec['lv']}" + (f" 凸{dup}" if dup else "") + f"（HP{hp} 攻{atk} 防{dfn}）")
+            f"Lv{rec['lv']} 技Lv{rec.get('skill', 1)}" + (f" 凸{dup}" if dup else "") +
+            f"（HP{hp} 攻{atk} 防{dfn}）")
 
 
 # ---------------- ガチャ ----------------
@@ -142,19 +183,26 @@ def _roll_rarity(force_sr: bool = False) -> str:
     return "R"
 
 
-def _pull_one(r: dict, force_sr: bool = False) -> str:
-    rarity = _roll_rarity(force_sr)
-    pool = [uid for uid, u in UNITS.items() if u[4] == rarity]
-    unit_id = random.choice(pool)
+def _apply_pull(r: dict, unit_id: str) -> str:
+    """1体入手をデータに反映して結果行を返す。被りは 技Lv→凸→$変換 の順に回る。"""
     rec = r["units"].get(unit_id)
     if rec is None:
-        r["units"][unit_id] = {"lv": 1, "exp": 0, "dup": 0}
+        r["units"][unit_id] = {"lv": 1, "exp": 0, "dup": 0, "skill": 1}
         return f"🆕 {unit_line(unit_id, r['units'][unit_id])}"
+    if rec.get("skill", 1) < MAX_SKILL:
+        rec["skill"] = rec.get("skill", 1) + 1
+        return f"🎯 必殺技Lv+1！ {unit_line(unit_id, rec)}"
     if rec.get("dup", 0) < MAX_DUP:
         rec["dup"] = rec.get("dup", 0) + 1
         return f"🔼 凸+1！ {unit_line(unit_id, rec)}"
-    # 凸上限の被りは $200 に変換
-    return f"💰 凸MAXの被り → {fmt(200)} に変換 {UNITS[unit_id][1]} {UNITS[unit_id][0]}"
+    # 全部MAXの被りは $200 に変換
+    return f"💰 全部MAXの被り → {fmt(200)} に変換 {UNITS[unit_id][1]} {UNITS[unit_id][0]}"
+
+
+def _pull_one(r: dict, force_sr: bool = False) -> str:
+    rarity = _roll_rarity(force_sr)
+    pool = [uid for uid, u in UNITS.items() if u[4] == rarity]
+    return _apply_pull(r, random.choice(pool))
 
 
 def _gacha_result_embed(gid: int, uid: int, lines: list, cost: int) -> discord.Embed:
@@ -235,7 +283,8 @@ class BattleView(discord.ui.View):
         self.party = []
         for pid in party_ids:
             hp, atk, dfn = unit_stats(pid, r["units"][pid])
-            self.party.append({"id": pid, "hp": hp, "max": hp, "atk": atk, "def": dfn, "cd": 0, "guard": False})
+            self.party.append({"id": pid, "hp": hp, "max": hp, "atk": atk, "def": dfn, "cd": 0, "guard": False,
+                               "skill": r["units"][pid].get("skill", 1)})
         name, emoji, elem, hp, atk, dfn, boss, enrage = STAGES[stage_no - 1]
         self.enemy = {"name": name, "emoji": emoji, "elem": elem, "hp": hp, "max": hp,
                       "atk": atk, "def": dfn, "boss": boss, "enrage": enrage,
@@ -243,6 +292,7 @@ class BattleView(discord.ui.View):
         self.queue = []
         self.actor = None
         self.buff_turns = 0
+        self.buff_pct = 0.0
         self.taunt_turns = 0
         self.taunt_by = None
         self._taunt_now = False
@@ -295,7 +345,7 @@ class BattleView(discord.ui.View):
 
     def _hit_enemy(self, f: dict, mult: float, label: str):
         elem = UNITS[f["id"]][2]
-        atk = f["atk"] * (1.3 if self.buff_turns > 0 else 1.0)
+        atk = f["atk"] * (1 + self.buff_pct if self.buff_turns > 0 else 1.0)
         dmg = self._damage(int(atk), elem, self.enemy, mult)
         self.enemy["hp"] -= dmg
         adv = elem_mult(elem, self.enemy["elem"])
@@ -388,7 +438,7 @@ class BattleView(discord.ui.View):
         self.add_item(b1)
         cd = f["cd"]
         b2 = discord.ui.Button(
-            label=f"スキル：{SKILL_NAME[role].split('（')[0]}" + (f"（あと{cd}）" if cd > 0 else ""),
+            label=f"スキル：{SKILL_NAME[role].split('（')[0]} Lv{f['skill']}" + (f"（あと{cd}）" if cd > 0 else ""),
             style=discord.ButtonStyle.success, row=0, disabled=cd > 0)
         b2.callback = lambda i: self._act(i, "skill")
         self.add_item(b2)
@@ -421,12 +471,13 @@ class BattleView(discord.ui.View):
             self._hit_enemy(f, 1.0, "通常攻撃")
         elif kind == "skill":
             f["cd"] = SKILL_CD[role]
+            m = skill_mult(f)
             if role == "attacker":
-                self._hit_enemy(f, 2.0, "強撃")
+                self._hit_enemy(f, 2.0 * m, "強撃")
             elif role == "mage":
-                self._hit_enemy(f, 1.8, "大魔法")
+                self._hit_enemy(f, 1.8 * m, "大魔法")
             elif role == "healer":
-                heal = int(f["atk"] * 1.2 * random.uniform(0.9, 1.1))
+                heal = int(f["atk"] * 1.2 * m * random.uniform(0.9, 1.1))
                 for t in self.party:
                     if t["hp"] > 0:
                         t["hp"] = min(t["max"], t["hp"] + heal)
@@ -434,10 +485,13 @@ class BattleView(discord.ui.View):
             elif role == "tank":
                 self.taunt_turns = 3
                 self.taunt_by = self.actor
-                self.log.append(f"{UNITS[f['id']][1]} 鉄壁の挑発 → 敵の攻撃を自分に集める（被ダメ半減）")
+                heal_self = int(f["max"] * 0.10 * m)
+                f["hp"] = min(f["max"], f["hp"] + heal_self)
+                self.log.append(f"{UNITS[f['id']][1]} 鉄壁の挑発 → 敵の攻撃を自分に集める（被ダメ半減）＋自分を {heal_self} 回復")
             elif role == "support":
                 self.buff_turns = 4
-                self.log.append(f"{UNITS[f['id']][1]} 鼓舞の歌 → 味方全体の攻撃+30%")
+                self.buff_pct = 0.30 * m
+                self.log.append(f"{UNITS[f['id']][1]} 鼓舞の歌 → 味方全体の攻撃+{int(self.buff_pct * 100)}%")
         elif kind == "guard":
             f["guard"] = True
             self.log.append(f"{UNITS[f['id']][1]} は防御の構え（被ダメ半減）")
@@ -541,10 +595,12 @@ def _rules_text() -> str:
         "・属性相性：火は木に強い／木は水に強い／水は火に強い／光と闇はお互いに強い（1.3倍）。逆は0.75倍。\n"
         "・役割：アタッカー=単体火力、魔法使い=大ダメージ、ヒーラー=全体回復、"
         "タンク=敵の攻撃を集めて耐える、サポーター=全体の攻撃アップ。\n"
-        "・ボスは4手番ごとに全体大技を溜めます。HP3割以下で怒るボスもいます。\n\n"
+        "・ボスは4手番ごとに全体大技を溜めます。HP3割以下で怒るボスもいます。\n"
+        "・編成に迷ったら自動編成（バランス型／ステージ相性／属性優先）がおすすめ。\n\n"
         "**🎰 仲間ガチャ**\n"
         f"・1回 {fmt(GACHA_COST)} ／ 10連 {fmt(GACHA10_COST)}（SR以上1人確定）。レア度: SSR 3% / SR 17% / R 80%。\n"
-        f"・被りは凸になって全ステータス+10%（最大{MAX_DUP}凸）。凸MAXの被りは {fmt(200)} に変換されます。\n"
+        f"・被りは必殺技Lvが上がります（最大{MAX_SKILL}、技の効果が最大2倍）。技LvMAX後の被りは凸\n"
+        f"（全ステータス+10%、最大{MAX_DUP}凸）。全部MAXの被りは {fmt(200)} に変換されます。\n"
         "・$ はカジノと共通です。カジノのログインボーナスやゲームで貯めてください。"
     )
 
@@ -560,12 +616,142 @@ def build_rpg_embed() -> discord.Embed:
     )
     embed.add_field(name="遊び方", value=(
         "⚔️ 冒険に出る → ステージを選んで戦闘\n"
-        "🧩 チーム編成 → 3人を選ぶ\n"
+        "🧩 チーム編成 → 3人を選ぶ（自動編成あり）\n"
         "🎰 仲間ガチャ → 新しい仲間を集める\n"
         "📊 ステータス → 進行度と所持ユニット"
     ), inline=False)
     embed.add_field(name="ステージ", value=f"全{len(STAGES)}面（5面と10面がボス）", inline=False)
     return embed
+
+
+# ---------------- 自動編成 ----------------
+def auto_party(r: dict, mode: str, elem: str = None, enemy_elem: str = None) -> list:
+    """方針に沿って所持ユニットから3人を選ぶ。
+    mode: "balance"（役割バランス）/ "stage"（敵に有利な属性）/ "elem"（指定属性を優先）。
+    どの方針でもタンクとヒーラーを1人ずつ優先して確保する。"""
+    def score(item):
+        uid, rec = item
+        s = unit_power(uid, rec)
+        e = UNITS[uid][2]
+        if mode == "elem" and elem:
+            if e == elem:
+                s += 1000
+        elif mode == "stage" and enemy_elem:
+            m = elem_mult(e, enemy_elem)
+            if m > 1:
+                s += 1000
+            elif m < 1:
+                s -= 500
+        return s
+
+    ranked = [uid for uid, _ in sorted(r["units"].items(), key=score, reverse=True)]
+    party = []
+    for want in ("tank", "healer"):
+        for uid in ranked:
+            if uid not in party and UNITS[uid][3] == want:
+                party.append(uid)
+                break
+    for uid in ranked:
+        if len(party) >= 3:
+            break
+        if uid not in party:
+            party.append(uid)
+    return party[:3]
+
+
+def _auto_mode_options(with_stage: bool):
+    opts = [discord.SelectOption(label="バランス型（タンク＋ヒーラー＋火力）", value="balance", emoji="⚖️",
+                                 description="役割をそろえて安定重視")]
+    if with_stage:
+        opts.append(discord.SelectOption(label="ステージ相性（敵に有利な属性を優先）", value="stage", emoji="🎯",
+                                         description="そのステージの敵に強い属性で組む"))
+    for e in ("火", "水", "木", "光", "闇"):
+        opts.append(discord.SelectOption(label=f"{e}属性を優先", value=f"elem:{e}", emoji=ELEMENT_EMOJI[e],
+                                         description=f"{e}属性の仲間を中心に組む"))
+    return opts
+
+
+class AutoPartyView(discord.ui.View):
+    """自動編成の方針を選ぶ → 編成を保存して結果を表示（stage_no があれば出発ボタン付き）"""
+
+    def __init__(self, gid: int, uid: int, stage_no: int = None):
+        super().__init__(timeout=300)
+        self.gid = gid
+        self.uid = uid
+        self.stage_no = stage_no
+        sel = discord.ui.Select(placeholder="自動編成の方針を選んでください",
+                                options=_auto_mode_options(stage_no is not None))
+        sel.callback = self._cb
+        self.add_item(sel)
+
+    async def _cb(self, interaction: discord.Interaction):
+        if interaction.user.id != self.uid:
+            await interaction.response.send_message("これはあなたのメニューではありません。", ephemeral=True)
+            return
+        value = interaction.data["values"][0]
+        r = _rpg(self.gid, self.uid)
+        if value == "stage" and self.stage_no is not None:
+            party = auto_party(r, "stage", enemy_elem=STAGES[self.stage_no - 1][2])
+            mode_label = "ステージ相性"
+        elif value.startswith("elem:"):
+            elem = value.split(":", 1)[1]
+            party = auto_party(r, "elem", elem=elem)
+            mode_label = f"{elem}属性優先"
+        else:
+            party = auto_party(r, "balance")
+            mode_label = "バランス型"
+        r["party"] = party
+        users.save()
+        lines = [unit_line(u, r["units"][u]) for u in party]
+        text = f"🤖 **自動編成（{mode_label}）でチームを組みました**\n" + "\n".join(lines)
+        if self.stage_no is not None:
+            await interaction.response.send_message(text, view=DepartView(self.gid, self.uid, self.stage_no), ephemeral=True)
+        else:
+            await interaction.response.send_message(text, ephemeral=True)
+
+
+class DepartView(discord.ui.View):
+    """自動編成の結果から、そのままステージへ出発する"""
+
+    def __init__(self, gid: int, uid: int, stage_no: int):
+        super().__init__(timeout=300)
+        self.gid = gid
+        self.uid = uid
+        self.stage_no = stage_no
+
+    @discord.ui.button(label="この編成で出発", emoji="⚔️", style=discord.ButtonStyle.success)
+    async def depart(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.uid:
+            await interaction.response.send_message("これはあなたの戦闘ではありません。", ephemeral=True)
+            return
+        battle = BattleView(self.gid, self.uid, self.stage_no)
+        await battle.start(interaction)
+
+
+class StartChoiceView(discord.ui.View):
+    """ステージ決定後: 今の編成で出発 / 自動編成してから出発"""
+
+    def __init__(self, gid: int, uid: int, stage_no: int):
+        super().__init__(timeout=300)
+        self.gid = gid
+        self.uid = uid
+        self.stage_no = stage_no
+
+    @discord.ui.button(label="今の編成で出発", emoji="⚔️", style=discord.ButtonStyle.primary)
+    async def keep(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.uid:
+            await interaction.response.send_message("これはあなたのメニューではありません。", ephemeral=True)
+            return
+        battle = BattleView(self.gid, self.uid, self.stage_no)
+        await battle.start(interaction)
+
+    @discord.ui.button(label="自動編成してから出発", emoji="🤖", style=discord.ButtonStyle.success)
+    async def auto(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.uid:
+            await interaction.response.send_message("これはあなたのメニューではありません。", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "自動編成の方針を選んでください:", view=AutoPartyView(self.gid, self.uid, self.stage_no), ephemeral=True)
 
 
 class StageSelectView(discord.ui.View):
@@ -592,36 +778,114 @@ class StageSelectView(discord.ui.View):
             await interaction.response.send_message("これはあなたのメニューではありません。", ephemeral=True)
             return
         stage = int(interaction.data["values"][0])
-        battle = BattleView(self.gid, self.uid, stage)
-        await battle.start(interaction)
+        r = _rpg(self.gid, self.uid)
+        lines = [unit_line(u, r["units"][u]) for u in r["party"] if u in r["units"]]
+        await interaction.response.send_message(
+            f"**ステージ{stage}** に挑戦します。今のチーム:\n" + "\n".join(lines),
+            view=StartChoiceView(self.gid, self.uid, stage), ephemeral=True)
 
 
 class PartySelectView(discord.ui.View):
+    """手動編成: 属性で絞って3人まで選び「この編成で決定」で保存。自動編成ボタンも併設。
+    所持数が増えてもセレクトの上限（25件）を超えないよう、属性フィルタで切り替える。"""
+
     def __init__(self, gid: int, uid: int):
         super().__init__(timeout=300)
         self.gid = gid
         self.uid = uid
         r = _rpg(gid, uid)
+        self.chosen = [p for p in r["party"] if p in r["units"]][:3]
+        self.filter_elem = None
+        self._build()
+
+    def _unit_options(self):
+        r = _rpg(self.gid, self.uid)
         opts = []
         for unit_id, rec in r["units"].items():
+            if self.filter_elem and UNITS[unit_id][2] != self.filter_elem:
+                continue
             name, emoji, elem, role, rarity, *_ = UNITS[unit_id]
             opts.append(discord.SelectOption(
                 label=f"{name}（Lv{rec['lv']}）", value=unit_id, emoji=emoji,
-                description=f"[{rarity}] {elem}・{ROLE_NAME[role]}" + ("（編成中）" if unit_id in r["party"] else "")))
-        sel = discord.ui.Select(placeholder="チームに入れる3人を選んでください", options=opts,
-                                min_values=1, max_values=min(3, len(opts)))
-        sel.callback = self._cb
-        self.add_item(sel)
+                description=f"[{rarity}] {elem}・{ROLE_NAME[role]} 技Lv{rec.get('skill', 1)}" +
+                            (f" 凸{rec['dup']}" if rec.get("dup") else "") +
+                            ("（選択中）" if unit_id in self.chosen else "")))
+        return opts[:25]
 
-    async def _cb(self, interaction: discord.Interaction):
+    def _build(self):
+        self.clear_items()
+        r = _rpg(self.gid, self.uid)
+        owned_elems = {UNITS[u][2] for u in r["units"]}
+        fopts = [discord.SelectOption(label="全ての属性", value="all", emoji="🌈")]
+        for e in ("火", "水", "木", "光", "闇"):
+            if e in owned_elems:
+                fopts.append(discord.SelectOption(label=f"{e}属性だけ表示", value=e, emoji=ELEMENT_EMOJI[e]))
+        fsel = discord.ui.Select(placeholder="絞り込み（属性）", options=fopts, row=0)
+        fsel.callback = self._on_filter
+        self.add_item(fsel)
+        usel = discord.ui.Select(placeholder="チームに入れる3人を選んでください", options=self._unit_options(),
+                                 min_values=0, max_values=3, row=1)
+        usel.callback = self._on_units
+        self.add_item(usel)
+        abtn = discord.ui.Button(label="自動編成", emoji="🤖", style=discord.ButtonStyle.success, row=2)
+        abtn.callback = self._on_auto
+        self.add_item(abtn)
+        cbtn = discord.ui.Button(label="この編成で決定", emoji="✅", style=discord.ButtonStyle.primary, row=2)
+        cbtn.callback = self._on_confirm
+        self.add_item(cbtn)
+
+    def _summary(self) -> str:
+        r = _rpg(self.gid, self.uid)
+        if not self.chosen:
+            return "チームに入れる3人を選んでください（属性で絞り込みもできます）:"
+        lines = [unit_line(u, r["units"][u]) for u in self.chosen]
+        return "現在の選択:\n" + "\n".join(lines) + "\n\nよければ「この編成で決定」を押してください。"
+
+    async def _on_filter(self, interaction: discord.Interaction):
         if interaction.user.id != self.uid:
             await interaction.response.send_message("これはあなたのメニューではありません。", ephemeral=True)
             return
-        chosen = list(interaction.data["values"])
+        v = interaction.data["values"][0]
+        self.filter_elem = None if v == "all" else v
+        self._build()
+        await interaction.response.edit_message(content=self._summary(), view=self)
+
+    async def _on_units(self, interaction: discord.Interaction):
+        if interaction.user.id != self.uid:
+            await interaction.response.send_message("これはあなたのメニューではありません。", ephemeral=True)
+            return
+        shown = {o.value for o in self._unit_options()}
+        selected = list(interaction.data["values"])
+        merged = [c for c in self.chosen if c not in shown] + selected
+        while len(merged) > 3:
+            for c in merged:
+                if c not in selected:
+                    merged.remove(c)
+                    break
+            else:
+                merged.pop(0)
+        self.chosen = merged
+        self._build()
+        await interaction.response.edit_message(content=self._summary(), view=self)
+
+    async def _on_auto(self, interaction: discord.Interaction):
+        if interaction.user.id != self.uid:
+            await interaction.response.send_message("これはあなたのメニューではありません。", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "自動編成の方針を選んでください:", view=AutoPartyView(self.gid, self.uid), ephemeral=True)
+
+    async def _on_confirm(self, interaction: discord.Interaction):
+        if interaction.user.id != self.uid:
+            await interaction.response.send_message("これはあなたのメニューではありません。", ephemeral=True)
+            return
+        if not self.chosen:
+            await interaction.response.send_message("1人以上選んでください（または自動編成を使ってください）。", ephemeral=True)
+            return
         r = _rpg(self.gid, self.uid)
-        r["party"] = chosen
+        r["party"] = list(self.chosen)
         users.save()
-        lines = [unit_line(u, r["units"][u]) for u in chosen]
+        lines = [unit_line(u, r["units"][u]) for u in self.chosen]
         await interaction.response.send_message("🧩 **チームを編成しました**\n" + "\n".join(lines), ephemeral=True)
 
 
@@ -662,7 +926,7 @@ class RpgPanelView(discord.ui.View):
             return
         bal = users.get(interaction.guild.id, interaction.user.id).get("money", 0)
         await interaction.response.send_message(
-            f"🎰 **仲間ガチャ**（残高 {fmt(bal)}）\nSSR 3% / SR 17% / R 80%。被りは凸（強化）になります。",
+            f"🎰 **仲間ガチャ**（残高 {fmt(bal)}）\nSSR 3% / SR 17% / R 80%。被りは必殺技Lv→凸の順に強化されます。",
             view=GachaView(interaction.guild.id, interaction.user.id), ephemeral=True)
 
     @discord.ui.button(label="ステータス", emoji="📊", style=discord.ButtonStyle.secondary, custom_id="rpg:status", row=1)
