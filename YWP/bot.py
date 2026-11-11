@@ -2203,13 +2203,77 @@ async def start_coin_target_account_creation(interaction: discord.Interaction, c
         ACCOUNT_RUNNING.discard(interaction.user.id)
         raise
 
+    started_at = datetime.now()
+    statuses: list[tuple[int, int, str]] = []
+    winners: list[tuple[int, int, AccountRecord]] = []
+    progress_message = None
+    progress_lock = asyncio.Lock()
+    dm_progress_message = None
+    dm_progress_lock = asyncio.Lock()
+    dm_progress_dead = False
+    dm_last_update = 0.0
+    slot_progress = {
+        slot: {'attempt': 0, 'completed': 0, 'hits': 0, 'status': '待機中'}
+        for slot in range(1, MAX_CONCURRENT_COIN_TARGET_ACCOUNTS + 1)
+    }
+    total_attempts = count * MAX_CONCURRENT_COIN_TARGET_ACCOUNTS
+    progress_dead = False
+
+    def progress_embed():
+        completed = sum(state['completed'] for state in slot_progress.values())
+        embed = discord.Embed(
+            title='🎯 SSS極ツチノコ狙い - 進行状況',
+            description=(f'枠ごとの試行数: **{count}回** / 全体予定: '
+                         f'**{total_attempts}回**\n'
+                         f'全体完了: **{completed}/{total_attempts}回**　'
+                         f'当たり: **{len(winners)}件**'),
+            color=COLOR_RUN if completed < total_attempts else COLOR_OK,
+            timestamp=datetime.now(),
+        )
+        for slot, state in slot_progress.items():
+            attempt = state['attempt']
+            if state['status'] == '停止・メンテナンスのため未実行':
+                status = '⏸ 停止'
+                attempt_text = f'{state["completed"]}/{count}完了'
+            elif state['completed'] >= count:
+                status = '✅ 完了'
+                attempt_text = f'{count}/{count}'
+            elif attempt:
+                status = '⚙️ 実行中'
+                attempt_text = f'{attempt}/{count}'
+            else:
+                status = '⏳ 待機中'
+                attempt_text = f'0/{count}'
+            remaining = max(0, count - state['completed'])
+            embed.add_field(
+                name=f'スロット {slot} - {status}',
+                value=(f'現在の試行: **{attempt_text}**\n'
+                       f'完了: **{state["completed"]}** / 残り: **{remaining}**\n'
+                       f'当たり: **{state["hits"]}件**\n'
+                       f'状態: {(state["status"] or "待機中")[:180]}'),
+                inline=True,
+            )
+        embed.set_footer(text='進行状況は約10秒ごとに更新されます')
+        return embed
+
+    async def update_dm_progress(force: bool = False):
+        nonlocal dm_last_update, dm_progress_dead
+        if dm_progress_dead or dm_progress_message is None:
+            return
+        async with dm_progress_lock:
+            now = time.monotonic()
+            if not force and now - dm_last_update < 3.0:
+                return
+            try:
+                await dm_progress_message.edit(embed=progress_embed())
+                dm_last_update = time.monotonic()
+            except discord.HTTPException as e:
+                dm_progress_dead = True
+                log_line(f'極ツチノコ作成のDM進捗更新に失敗: {str(e)[:120]}')
+
     try:
         dm_channel = await interaction.user.create_dm()
-        await dm_channel.send(
-            f'🎯 極ツチノコ狙いを開始しました。各スロット{count}件、'
-            f'全{MAX_CONCURRENT_COIN_TARGET_ACCOUNTS}スロットで合計'
-            f'{count * MAX_CONCURRENT_COIN_TARGET_ACCOUNTS}件を試行します。'
-            '完了後、当たりアカウントと全試行ログをTXTで送信します。')
+        dm_progress_message = await dm_channel.send(embed=progress_embed())
     except discord.Forbidden:
         ACCOUNT_RUNNING.discard(interaction.user.id)
         await interaction.followup.send(
@@ -2226,15 +2290,11 @@ async def start_coin_target_account_creation(interaction: discord.Interaction, c
             ephemeral=True)
         return
 
-    started_at = datetime.now()
-    statuses: list[tuple[int, int, str]] = []
-    winners: list[tuple[int, int, AccountRecord]] = []
-    progress_message = None
-    progress_lock = asyncio.Lock()
-    progress_dead = False
-
     async def progress(slot: int, attempt: int, text: str):
         nonlocal progress_message, progress_dead
+        slot_progress[slot]['attempt'] = attempt
+        slot_progress[slot]['status'] = text
+        await update_dm_progress()
         async with progress_lock:
             if progress_dead:
                 return
@@ -2253,10 +2313,14 @@ async def start_coin_target_account_creation(interaction: discord.Interaction, c
         for attempt in range(1, count + 1):
             if ACCOUNT_PAUSE['paused'] or maint_window():
                 statuses.append((slot, attempt, '停止・メンテナンスのため未実行'))
+                slot_progress[slot]['status'] = '停止・メンテナンスのため未実行'
                 return
 
             rec: AccountRecord | None = None
             lease = None
+            slot_progress[slot]['attempt'] = attempt
+            slot_progress[slot]['status'] = 'アカウント作成を開始'
+            await update_dm_progress()
             try:
                 async with COIN_TARGET_ACCOUNT_SEM:
                     lease = await lease_proxy()
@@ -2273,6 +2337,7 @@ async def start_coin_target_account_creation(interaction: discord.Interaction, c
                             COIN_TARGET_ACCOUNT_STAGE_IDS, log_identity=False)
                         if COIN_TARGET_YOUKAI_ID in rec.coin_gacha_youkai_ids:
                             winners.append((slot, attempt, rec))
+                            slot_progress[slot]['hits'] += 1
                             status = '当たり（極ツチノコ）'
                         elif not rec.cleared:
                             status = 'ステージ進行失敗'
@@ -2289,25 +2354,37 @@ async def start_coin_target_account_creation(interaction: discord.Interaction, c
                 if lease is not None:
                     lease.release()
             statuses.append((slot, attempt, status))
+            slot_progress[slot]['completed'] += 1
+            slot_progress[slot]['status'] = status
+            await update_dm_progress()
             await progress(slot, attempt, f'試行結果: {status} '
                            f'（当たり {len(winners)}件）')
 
+    async def refresh_dm_progress():
+        while True:
+            await asyncio.sleep(10)
+            await update_dm_progress(force=True)
+
+    updater = asyncio.create_task(refresh_dm_progress())
     try:
         await asyncio.gather(*(worker(slot)
                                for slot in range(1, MAX_CONCURRENT_COIN_TARGET_ACCOUNTS + 1)))
     except Exception as e:
         log_line(f'極ツチノコ作成を中断: {str(e)[:180]}')
     finally:
+        updater.cancel()
+        await asyncio.gather(updater, return_exceptions=True)
         ACCOUNT_RUNNING.discard(interaction.user.id)
 
     finished_at = datetime.now()
+    await update_dm_progress(force=True)
     report = coin_target_report(winners, statuses, count, started_at, finished_at)
     filename = f'coin_target_{started_at:%Y%m%d_%H%M}.txt'
     completed_attempts = sum(
         status != '停止・メンテナンスのため未実行'
         for _, _, status in statuses)
     header = (f'🎯 極ツチノコ狙い完了: 当たり {len(winners)}件 / '
-              f'完了試行 {completed_attempts}/'
+              f'完了 {completed_attempts}/'
               f'{count * MAX_CONCURRENT_COIN_TARGET_ACCOUNTS}件。結果とログを添付します。')
     sent = False
     try:
