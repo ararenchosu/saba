@@ -152,9 +152,11 @@ PASSWORD_LEN = 10                # 自動生成パスワードの文字数
 MAIL_WAIT_TIMEOUT = 120.0        # 登録メールを待つ最大秒数
 MAIL_POLL_INTERVAL = 5.0         # メールボックスの再確認間隔（秒）
 MAX_CONCURRENT_ACCOUNTS = 2      # 同時に作成できるアカウント数の上限
+MAX_CONCURRENT_COIN_TARGET_ACCOUNTS = 5
 MAX_ACCOUNTS_PER_RUN = 999999   # 1回の操作で指定できる作成数の上限
 ACCOUNT_TXT_THRESHOLD = 1        # この件数以上まとめて作ったら .txt にしてDM送信
 PLAYER_NAME_MAX = 16             # アカウント名の最大文字数（長すぎるとサーバーが弾く）
+COIN_TARGET_ACCOUNT_SEM = asyncio.Semaphore(MAX_CONCURRENT_COIN_TARGET_ACCOUNTS)
 
 # --- 久垢作成（アカウント作成＋セーブ作成＋初回ステージクリアまでやる） ---
 AGED_STAGE_ID = 1001001          # 久垢作成でクリアさせるステージ
@@ -166,6 +168,8 @@ VIP_GACHA_COUNT = 240            # 既定の連数。サーバーの上限（lim
 VIP_STAGE_GAP = (2.0, 5.0)       # 面と面のあいだの待ち（秒）
 VIP_STAGE_COUNT = 6              # 回し放題垢で先にクリアする面数（イベステ解放の16面の先頭から）
 COIN_ACCOUNT_STAGE_IDS = tuple(range(1001001, 1001016))
+COIN_TARGET_ACCOUNT_STAGE_IDS = tuple(range(1001001, 1001007))
+COIN_TARGET_YOUKAI_ID = '9000191'  # SSSランク 極ツチノコ
 VIP_PRICE = 0                    # 有料版の1垢の料金（円）。0 は未設定で、有料版は受け付けない
 VIP_PAID_MAX = 10                # 有料版で1回に注文できる垢の数
 VIP_EXIST_PRICE = 0              # 有料版「既存の垢に240連」の料金（円/1垢）。0 は未設定で受け付けない
@@ -1518,6 +1522,7 @@ class AccountRecord:
         self.vip_tally: collections.Counter = collections.Counter()   # 引いた妖怪（vip_tally）
         self.coin_gacha_ok: bool | None = None
         self.coin_gacha_text: str | None = None
+        self.coin_gacha_youkai_ids: set[str] = set()
         self.present_text: str | None = None
 
 
@@ -1913,9 +1918,11 @@ def coin_gacha_result_text(c: Client, results: list) -> str:
     return f'ガチャ回数: {len(results)}回\n' + '\n'.join(lines)
 
 
-async def make_coin_gacha_account(rec: AccountRecord, progress):
-    """第1章1〜15面をクリアし、所持コインをすべて使って結果を記録する"""
-    rec.clear_target = '第1章 1〜15面'
+async def make_coin_gacha_account(rec: AccountRecord, progress,
+                                  stage_ids: tuple[int, ...] = COIN_ACCOUNT_STAGE_IDS,
+                                  log_identity: bool = True):
+    """指定された第1章ステージをクリアし、所持コインをすべて使って結果を記録する"""
+    rec.clear_target = f'第1章 1〜{len(stage_ids)}面'
     if rec.client is None:
         rec.cleared = False
         rec.clear_error = 'セーブデータを作成できなかったため進行できません'
@@ -1925,14 +1932,15 @@ async def make_coin_gacha_account(rec: AccountRecord, progress):
         return
 
     c = rec.client
+    identity = f' email={rec.email}' if log_identity else ''
     try:
-        for index, stage_id in enumerate(COIN_ACCOUNT_STAGE_IDS, 1):
+        for index, stage_id in enumerate(stage_ids, 1):
             if ACCOUNT_PAUSE['paused'] or maint_window():
                 raise RuntimeError('メンテナンスまたは管理者停止のため中断しました')
             if index > 1:
                 await asyncio.sleep(random.uniform(*VIP_STAGE_GAP))
             await progress(
-                f'⚔ 第1章を進行中... ステージ `{stage_id}`（{index}/{len(COIN_ACCOUNT_STAGE_IDS)}）')
+                f'⚔ 第1章を進行中... ステージ `{stage_id}`（{index}/{len(stage_ids)}）')
             await clear_stage(c, stage_id, progress, inspect=False)
         rec.cleared = True
     except Exception as e:
@@ -1959,7 +1967,7 @@ async def make_coin_gacha_account(rec: AccountRecord, progress):
             await progress('ℹ 受取可能な郵便はありませんでした')
     except Exception as e:
         rec.present_text = f'受け取りに失敗しました: {str(e)[:180]}'
-        log_line(f'初期垢の郵便受け取りに失敗 {rec.email}: {str(e)[:180]}')
+        log_line(f'初期垢の郵便受け取りに失敗{identity}: {str(e)[:180]}')
         await progress(f'⚠ 郵便の受け取りに失敗: `{str(e)[:150]}`')
 
     await progress('🔄 郵便受取後の所持数を更新しています...')
@@ -1978,18 +1986,21 @@ async def make_coin_gacha_account(rec: AccountRecord, progress):
         if not expected:
             rec.coin_gacha_ok = True
             rec.coin_gacha_text = '使用できるコインはありませんでした'
-            log_line(f'コインガチャ対象なし email={rec.email} 郵便={rec.present_text}')
+            log_line(f'コインガチャ対象なし{identity} 郵便={rec.present_text}')
             await progress('ℹ 使用できるコインがありませんでした')
             return
-        log_line(f'コインガチャ開始 email={rec.email} 対象={coins}')
+        log_line(f'コインガチャ開始{identity} 対象={coins}')
         results = await asyncio.to_thread(c.pull_coin_gachas, None, coins)
+        rec.coin_gacha_youkai_ids = {
+            str(yid) for _, _, pulled in results for yid in pulled
+        }
         rec.coin_gacha_text = coin_gacha_result_text(c, results)
         rec.coin_gacha_ok = len(results) == expected
         if not rec.coin_gacha_ok:
             rec.coin_gacha_text += f'\n⚠ {expected}枚中{len(results)}枚を使用しました'
-            log_line(f'コインガチャ未完了 email={rec.email} 予定={expected} 実行={len(results)}')
+            log_line(f'コインガチャ未完了{identity} 予定={expected} 実行={len(results)}')
         else:
-            log_line(f'コインガチャ完了 email={rec.email} 回数={len(results)}')
+            log_line(f'コインガチャ完了{identity} 回数={len(results)}')
         await progress(f'🎰 コインガチャ完了（{len(results)}/{expected}回）')
     except Exception as e:
         rec.coin_gacha_ok = False
@@ -2136,6 +2147,146 @@ async def send_accounts_txt(interaction: discord.Interaction,
     except discord.HTTPException:
         pass
     return sent
+
+
+def coin_target_report(winners: list[tuple[int, AccountRecord]], statuses: list[str],
+                       count: int, started_at: datetime, finished_at: datetime) -> str:
+    lines = [
+        'ぷにぷに SSSランク 極ツチノコ狙い 作成ログ',
+        f'対象妖怪ID: {COIN_TARGET_YOUKAI_ID}',
+        f'指定試行数: {count} / 完了試行数: {sum(bool(s) for s in statuses)}',
+        f'当たり: {len(winners)}件',
+        f'{fmt_jp_datetime(started_at)} 〜 {fmt_jp_datetime(finished_at)}',
+        '',
+        '【当たりアカウント】',
+    ]
+    for index, rec in sorted(winners, key=lambda item: item[0]):
+        lines += [
+            f'試行 {index}',
+            f'メールアドレス: {rec.email}',
+            f'パスワード: {rec.password}',
+            f'セーブデータ: {rec.save_name or "作成失敗"}',
+            f'郵便受け取り: {rec.present_text or "結果なし"}',
+            f'ガチャ結果: {rec.coin_gacha_text or "結果なし"}',
+            '',
+        ]
+    lines += ['【試行ログ】']
+    lines.extend(f'{index}: {status or "未実行"}'
+                 for index, status in enumerate(statuses, 1))
+    return '\n'.join(lines)
+
+
+async def start_coin_target_account_creation(interaction: discord.Interaction, count: int,
+                                             password: str | None = None):
+    """5枠で試行し、SSSランク極ツチノコを獲得したアカウントだけDMで渡す"""
+    why = creation_blocker(interaction.user.id, None)
+    if why:
+        return await interaction.response.send_message(why, ephemeral=True)
+    ACCOUNT_RUNNING.add(interaction.user.id)
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=True)
+    except Exception:
+        ACCOUNT_RUNNING.discard(interaction.user.id)
+        raise
+
+    started_at = datetime.now()
+    statuses = [''] * count
+    winners: list[tuple[int, AccountRecord]] = []
+    progress_message = None
+    progress_lock = asyncio.Lock()
+    index_lock = asyncio.Lock()
+    next_index = 0
+    progress_dead = False
+
+    async def progress(index: int, text: str):
+        nonlocal progress_message, progress_dead
+        async with progress_lock:
+            if progress_dead:
+                return
+            content = f'`[{index}/{count}]` {text}'
+            try:
+                if progress_message is None:
+                    progress_message = await interaction.followup.send(content, ephemeral=True)
+                else:
+                    await progress_message.edit(content=content)
+            except discord.HTTPException as e:
+                progress_dead = True
+                log_line(f'極ツチノコ作成の進捗通知に失敗: {str(e)[:120]}')
+
+    async def worker():
+        nonlocal next_index
+        while True:
+            async with index_lock:
+                if next_index >= count:
+                    return
+                next_index += 1
+                index = next_index
+            if ACCOUNT_PAUSE['paused'] or maint_window():
+                statuses[index - 1] = '停止またはメンテナンスのため未実行'
+                return
+
+            rec = None
+            lease = None
+            try:
+                async with COIN_TARGET_ACCOUNT_SEM:
+                    lease = await lease_proxy()
+                    rec = await create_level5_account(
+                        lambda text: progress(index, text),
+                        password=(password or '').strip() or None,
+                        proxy=lease.url if lease is not None else None,
+                    )
+                    if rec.client is None:
+                        statuses[index - 1] = 'セーブデータ作成失敗'
+                    else:
+                        await make_coin_gacha_account(
+                            rec, lambda text: progress(index, text),
+                            COIN_TARGET_ACCOUNT_STAGE_IDS, log_identity=False)
+                        if COIN_TARGET_YOUKAI_ID in rec.coin_gacha_youkai_ids:
+                            winners.append((index, rec))
+                            statuses[index - 1] = '当たり（極ツチノコ）'
+                        elif not rec.cleared:
+                            statuses[index - 1] = 'ステージ進行失敗'
+                        elif not rec.coin_gacha_ok:
+                            statuses[index - 1] = 'コインガチャ失敗または対象コインなし'
+                        else:
+                            statuses[index - 1] = '当たりなし'
+                    rec.client = None
+            except Exception as e:
+                statuses[index - 1] = 'アカウント作成失敗'
+                log_line(f'極ツチノコ作成 試行{index}失敗: {str(e)[:180]}')
+            finally:
+                if lease is not None:
+                    lease.release()
+            await progress(index, f'試行結果: {statuses[index - 1]} '
+                           f'（当たり {len(winners)}件）')
+
+    try:
+        await asyncio.gather(*(worker() for _ in range(min(count, MAX_CONCURRENT_COIN_TARGET_ACCOUNTS))))
+    except Exception as e:
+        log_line(f'極ツチノコ作成を中断: {str(e)[:180]}')
+    finally:
+        ACCOUNT_RUNNING.discard(interaction.user.id)
+
+    finished_at = datetime.now()
+    report = coin_target_report(winners, statuses, count, started_at, finished_at)
+    filename = f'coin_target_{started_at:%Y%m%d_%H%M}.txt'
+    header = (f'🎯 極ツチノコ狙い完了: 当たり {len(winners)}件 / '
+              f'試行 {sum(bool(s) for s in statuses)}/{count}件。結果とログを添付します。')
+    sent = False
+    try:
+        await interaction.user.send(
+            header, file=discord.File(io.BytesIO(report.encode('utf-8')), filename=filename))
+        sent = True
+    except discord.HTTPException as e:
+        log_line(f'極ツチノコ作成ログのDM送信に失敗 user={interaction.user.id}: {str(e)[:120]}')
+    try:
+        await interaction.followup.send(
+            header if sent else header + '\n⚠ DMに送れなかったため、こちらに添付します。',
+            file=discord.File(io.BytesIO(report.encode('utf-8')), filename=filename),
+            ephemeral=True)
+    except discord.HTTPException as e:
+        log_line(f'極ツチノコ作成ログの添付に失敗 user={interaction.user.id}: {str(e)[:120]}')
 
 
 def creation_blocker(user_id: int, name_tpl: str | None) -> str | None:
@@ -5513,7 +5664,7 @@ class AccountCountModal(discord.ui.Modal, title='アカウント作成'):
 
 
 class AccountModeView(discord.ui.View):
-    """通常作成か、15面進行＋コインガチャ付き作成かを選ぶ"""
+    """通常作成、コインガチャ初期垢、極ツチノコ狙いを選ぶ"""
 
     def __init__(self, owner_id: int):
         super().__init__(timeout=180)
@@ -5538,6 +5689,42 @@ class AccountModeView(discord.ui.View):
     async def coin_gacha(self, interaction: discord.Interaction,
                          button: discord.ui.Button):
         await interaction.response.send_modal(AccountCountModal(coin_gacha=True))
+
+    @discord.ui.button(label='SSS極ツチノコ狙い（5枠）', style=discord.ButtonStyle.danger,
+                       emoji='🎯')
+    async def coin_target(self, interaction: discord.Interaction,
+                          button: discord.ui.Button):
+        await interaction.response.send_modal(CoinTargetAccountModal())
+
+
+class CoinTargetAccountModal(discord.ui.Modal, title='SSS極ツチノコ狙い'):
+    count = discord.ui.Label(
+        text='試行数',
+        description=f'第1章6面まで進行後、郵便受取・コインガチャを実行します（最大{MAX_ACCOUNTS_PER_RUN:,}件）',
+        component=discord.ui.TextInput(
+            placeholder='試行するアカウント数', default='1', max_length=6),
+    )
+    password = discord.ui.Label(
+        text='パスワード（固定・任意）',
+        description='空欄ならアカウントごとに自動生成します',
+        component=discord.ui.TextInput(
+            placeholder='空欄で自動生成', required=False, max_length=100),
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            count = int(self.count.component.value.strip().replace(',', ''))
+        except ValueError:
+            count = 0
+        if not (1 <= count <= MAX_ACCOUNTS_PER_RUN):
+            return await interaction.response.send_message(
+                f'❌ 試行数は1〜{MAX_ACCOUNTS_PER_RUN:,}の整数で指定してください。',
+                ephemeral=True)
+        await start_coin_target_account_creation(
+            interaction, count, self.password.component.value)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        await report_error(interaction, error, 'CoinTargetAccountModal')
 
 
 class VipAccountModal(AccountCountModal):
@@ -7375,6 +7562,8 @@ def panel_embed() -> discord.Embed:
             f'↳ {ACCOUNT_TXT_THRESHOLD}件以上は `メアド:パスワード` の.txtをDMに添付\n'
             '🎰 **初期垢＋コインガチャ**: 第1章1〜15面をクリアして所持コインをすべて使用\n'
             '↳ メール・パスワード・獲得キャラを記載した.txtをDMに添付\n'
+            '🎯 **SSS極ツチノコ狙い**: 6面まで進行後に郵便を受け取り、コインガチャを実行（専用5枠）\n'
+            '↳ 指定試行数の完了後、当たりアカウント情報と全試行ログを.txtでDM\n'
             f'🕰 **久垢作成**: ステージ`{AGED_STAGE_ID}`クリア済みのアカウントは '
             '`/久垢作成設置` のパネルから作成\n\n'
             '💡 ステージIDが不明なら **📋 ステージ一覧** を確認\n'
