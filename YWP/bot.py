@@ -140,6 +140,8 @@ SAVE_SELECT_TIMEOUT = 180       # セーブデータが複数あるとき選択�
 # user_id -> [FarmJob]（複垢代行で1人が複数ジョブを並走させる）
 JOBS: dict[int, "list[FarmJob]"] = {}
 FARM_DASHBOARD_MESSAGES: dict[int, discord.Message] = {}
+FARM_DASHBOARD_RESEND_PENDING: set[int] = set()
+FARM_DASHBOARD_RESEND_DONE: set[int] = set()
 # user_id -> {'udkey','userId','name','at'}  ※ディスクには書かない。再起動で消える
 SESSIONS: dict[int, dict] = {}
 SEM = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
@@ -606,7 +608,8 @@ async def wait_event_end(job, lead: int = 300) -> bool:
             job.cancel.set()
             job.status = f'⏹ イベント終了間近のため自動停止（{deadline:%m/%d %H:%M}）'
             try:
-                await job.user.send(f'🛑 **#{job.jid}** イベント終了の5分前になったので周回を自動停止しました。')
+                await send_job_message(
+                    job, f'🛑 **#{job.jid}** イベント終了の5分前になったので周回を自動停止しました。')
             except discord.HTTPException:
                 pass
         return True
@@ -642,8 +645,9 @@ async def wait_maintenance(job) -> bool:
     job.status = f'🛠 メンテのため停止中（{maint_text(w)}）'
     log_line(f'メンテのため停止 #{job.jid}: {maint_text(w)}')
     try:
-        await job.user.send(f'🛠 **#{job.jid}** メンテ（{maint_text(w)}）のため周回を止めました。'
-                            '管理者が「メンテ停止を解除」すると、止まったところから再開します。')
+        await send_job_message(
+            job, f'🛠 **#{job.jid}** メンテ（{maint_text(w)}）のため周回を止めました。'
+            '管理者が「メンテ停止を解除」すると、止まったところから再開します。')
     except discord.HTTPException:
         pass
     await update_progress(job, force=True)
@@ -654,7 +658,8 @@ async def wait_maintenance(job) -> bool:
     log_line(f'メンテ停止の解除 周回を再開 #{job.jid}')
     job.status = prev if prev and not prev.startswith('🛠') else '⚔ 周回中'
     try:
-        await job.user.send(f'▶ **#{job.jid}** メンテ停止が解除されたので、周回を再開します。')
+        await send_job_message(
+            job, f'▶ **#{job.jid}** メンテ停止が解除されたので、周回を再開します。')
     except discord.HTTPException:
         pass
     return False
@@ -4156,7 +4161,8 @@ async def start_grind(job: FarmJob, c: Client, need: float) -> bool:
     log_line(f'育成開始 #{job.jid}: {hard} は安全な速さだと1戦{need:.0f}秒 → {target} を'
              f'あと{left}勝（{TRUST_BATTLES}勝で育った垢）')
     try:
-        await job.user.send(
+        await send_job_message(
+            job,
             f'📈 **#{job.jid}** ステージ `{hard}` は、この垢だと弾かれない速さで1戦{need:.0f}秒'
             f'かかります。`{target}` を安全な速さで **あと{left}勝** して垢を育ててから戻ります'
             f'（安全な速さで勝ちを重ねた垢は、速く回しても弾かれていないため。{TRUST_BATTLES}勝で育った垢とします）。')
@@ -4174,7 +4180,8 @@ async def grind_step(job: FarmJob, c: Client):
     done_for, job.grind_stage = job.grind_for, None
     log_line(f'育成終了 #{job.jid}: {trust_wins(c.userId)}勝で育った垢になった → {done_for} に戻る')
     try:
-        await job.user.send(
+        await send_job_message(
+            job,
             f'📈 **#{job.jid}** 垢が育ったので（{trust_wins(c.userId)}勝）、'
             + (f'`{done_for}` の次の面から' if job.is_preset else f'`{done_for}` を')
             + '速く回します。')
@@ -4224,7 +4231,8 @@ async def on_befriend(job: FarmJob, c: Client, start: dict, result: dict):
         return
     outcome = await auto_deck_after(job, c, start, yid)
     try:
-        await job.user.send(
+        await send_job_message(
+            job,
             f'🤝 **{youkai_label(yid)}** が仲間になりました'
             f'（#{job.jid}・{job.done}戦目・通算 {job.befriend_counts[yid]}回目）\n'
             f'→ {outcome}')
@@ -4518,7 +4526,8 @@ async def _run_job(job: FarmJob, email: str, password: str,
         await update_progress(job, force=True)
 
         async def _send_prompt(view, accs):
-            return await job.user.send(
+            return await send_job_message(
+                job,
                 content=(f'🗂 このアカウントには **{len(accs)}件** のセーブデータがあります。\n'
                          'ログインするセーブデータを選択してください'
                          f'（{SAVE_SELECT_TIMEOUT // 60}分でタイムアウト）'),
@@ -4651,8 +4660,10 @@ async def _run_job(job: FarmJob, email: str, password: str,
                     job.stage_pos = first
                     log_line(f'プリセット: クリア済みの {first}面を飛ばして {job.stage_ids[first]} から始める')
                     try:
-                        await job.user.send(f'⏩ **#{job.jid}** クリア済みの{first}面を飛ばして、'
-                                            f'まだクリアしていない `{job.stage_ids[first]}` から始めます。')
+                        await send_job_message(
+                            job,
+                            f'⏩ **#{job.jid}** クリア済みの{first}面を飛ばして、'
+                            f'まだクリアしていない `{job.stage_ids[first]}` から始めます。')
                     except discord.HTTPException:
                         pass
             if (not job.is_preset and job.stage_id not in stages
@@ -4981,7 +4992,7 @@ async def finish_job(job: FarmJob):
             await job.message.edit(embed=embed, view=None)
             jump = job.message.jump_url
         else:
-            job.message = await job.user.send(embed=embed)
+            job.message = await send_job_message(job, embed=embed)
             return
     except discord.HTTPException:
         pass
@@ -4993,7 +5004,8 @@ async def finish_job(job: FarmJob):
     body = (f'{head} **#{job.jid}** — {stage_txt} / '
             f'成功 **{job.success}** ・失敗 **{job.fail}** ・所要 {fmt_sec(job.elapsed)}')
     try:
-        await job.user.send(f'{body}\n{jump}' if jump else body, embed=None if jump else embed)
+        await send_job_message(
+            job, f'{body}\n{jump}' if jump else body, embed=None if jump else embed)
     except discord.HTTPException:
         pass
 
@@ -5142,15 +5154,18 @@ class FarmDashboardView(discord.ui.View):
             )
             for job in jobs[:MAX_JOBS_PER_USER]
         ]
-        if options:
-            select = discord.ui.Select(
-                placeholder='詳細を表示・操作するアカウントを選択',
-                options=options,
-                custom_id=f'ywp:dashboard:select:{owner_id}',
-                row=0,
-            )
-            select.callback = self._select_job
-            self.add_item(select)
+        if not options:
+            options.append(discord.SelectOption(
+                label='実行中のジョブなし', value='none'))
+        select = discord.ui.Select(
+            placeholder='詳細を表示・操作するアカウントを選択',
+            options=options,
+            custom_id=f'ywp:dashboard:select:{owner_id}',
+            row=0,
+            disabled=not jobs,
+        )
+        select.callback = self._select_job
+        self.add_item(select)
         self.add_item(discord.ui.Button(
             label='情報更新', emoji='🔄', style=discord.ButtonStyle.primary,
             custom_id=f'ywp:dashboard:refresh:{owner_id}', row=1,
@@ -5197,6 +5212,11 @@ class FarmDashboardView(discord.ui.View):
         await interaction.response.edit_message(
             embed=farm_dashboard_embed(self.owner_id, jid),
             view=FarmDashboardView(self.owner_id, jid))
+        if interaction.message is not None and not remember_farm_dashboard_panel(
+                self.owner_id, interaction.channel_id, interaction.message.id, jid):
+            await interaction.followup.send(
+                '⚠️ 選択状態を再起動後に復元できるよう保存できませんでした。',
+                ephemeral=True)
 
     def _selected_job(self, interaction: discord.Interaction) -> FarmJob | None:
         if self.selected_jid is None:
@@ -5507,12 +5527,77 @@ async def update_farm_dashboard(user: discord.abc.User, selected_jid: int | None
     if message is not None:
         try:
             await message.edit(embed=embed, view=view)
+            if user_id not in FARM_DASHBOARD_RESEND_DONE:
+                FARM_DASHBOARD_RESEND_PENDING.add(user_id)
             return message
         except discord.NotFound:
             FARM_DASHBOARD_MESSAGES.pop(user_id, None)
     message = await user.send(embed=embed, view=view)
     FARM_DASHBOARD_MESSAGES[user_id] = message
+    if user_id not in FARM_DASHBOARD_RESEND_DONE:
+        FARM_DASHBOARD_RESEND_PENDING.add(user_id)
     return message
+
+
+async def resend_farm_dashboard(user: discord.abc.User):
+    """集約パネルを新しいDMとして送り直す"""
+    message = await user.send(
+        embed=farm_dashboard_embed(user.id),
+        view=FarmDashboardView(user.id))
+    FARM_DASHBOARD_MESSAGES[user.id] = message
+    return message
+
+
+async def send_job_message(job: FarmJob, *args, **kwargs):
+    """次のジョブ通知に合わせて、集約パネルを一度だけ再送信する"""
+    user_id = job.user.id
+    if user_id in FARM_DASHBOARD_RESEND_PENDING:
+        FARM_DASHBOARD_RESEND_PENDING.discard(user_id)
+        FARM_DASHBOARD_RESEND_DONE.add(user_id)
+        try:
+            await resend_farm_dashboard(job.user)
+        except discord.HTTPException as e:
+            log_line(f'周回ダッシュボード再送信に失敗 user={user_id}: {str(e)[:120]}')
+    return await job.user.send(*args, **kwargs)
+
+
+FARM_DASHBOARD_PANELS_FILE = os.path.join(BASE_DIR, 'data', 'farm_dashboard_panels.json')
+
+
+def _farm_dashboard_panel_records() -> list[dict]:
+    try:
+        with open(FARM_DASHBOARD_PANELS_FILE, encoding='utf-8') as f:
+            data = json.load(f)
+        return [record for record in data if isinstance(record, dict)] \
+            if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _save_farm_dashboard_panel_records(records: list[dict]) -> bool:
+    try:
+        os.makedirs(os.path.dirname(FARM_DASHBOARD_PANELS_FILE), exist_ok=True)
+        tmp = FARM_DASHBOARD_PANELS_FILE + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(records, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, FARM_DASHBOARD_PANELS_FILE)
+        return True
+    except OSError as e:
+        log_line(f'周回パネル情報の保存に失敗: {e}')
+        return False
+
+
+def remember_farm_dashboard_panel(owner_id: int, channel_id: int, message_id: int,
+                                  selected_jid: int | None = None) -> bool:
+    records = [record for record in _farm_dashboard_panel_records()
+               if record.get('message_id') != message_id]
+    records.append({
+        'owner_id': owner_id,
+        'channel_id': channel_id,
+        'message_id': message_id,
+        'selected_jid': selected_jid,
+    })
+    return _save_farm_dashboard_panel_records(records)
 
 
 # ============================================================================
@@ -8191,6 +8276,22 @@ class YWPBot(commands.Bot):
             activity=discord.Game(name='ぷにぷに 自動周回'))
         # 再起動前に動いていた周回を続きから再開する（2回目以降の on_ready では何もしない）
         await restore_jobs()
+        if not getattr(self, '_farm_dashboard_views_registered', False):
+            for record in _farm_dashboard_panel_records():
+                try:
+                    owner_id = int(record['owner_id'])
+                    message_id = int(record['message_id'])
+                    selected_jid = int(record['selected_jid']) \
+                        if record.get('selected_jid') is not None else None
+                except (KeyError, TypeError, ValueError):
+                    log_line(f'周回パネル情報を読み取れません: {record}')
+                    continue
+                if selected_jid is not None and find_job(owner_id, selected_jid) is None:
+                    selected_jid = None
+                self.add_view(
+                    FarmDashboardView(owner_id, selected_jid),
+                    message_id=message_id)
+            self._farm_dashboard_views_registered = True
         if not getattr(self, '_orders_checked', False):
             self._orders_checked = True
             await report_unfinished_orders()
@@ -8242,18 +8343,37 @@ async def coin_gacha_command(interaction: discord.Interaction):
     await open_coin_gacha(interaction)
 
 
-@bot.tree.command(name='周回状況', description='自分の周回の進捗を表示します')
+@bot.tree.command(name='周回状況', description='自分の周回状況をこのチャンネルに常設表示します')
 async def farm_status(interaction: discord.Interaction):
     jobs = jobs_of(interaction.user.id)
     if not jobs:
         return await interaction.response.send_message(
-            '📭 実行中の周回はありません。', ephemeral=True)
-    # 開いただけでは取り直さない。最新にしたいときは「🔄 更新」を押す
-    if len(jobs) == 1:
-        embed, view = progress_embed(jobs[0]), CancelView(jobs[0])
-    else:
-        embed, view = jobs_list_embed(jobs), JobsCancelView(jobs)
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+            embed=jobs_list_embed([]))
+    view = FarmDashboardView(interaction.user.id)
+    try:
+        await interaction.response.send_message(
+            embed=jobs_list_embed(jobs), view=view)
+    except discord.Forbidden:
+        return await interaction.response.send_message(
+            '❌ このチャンネルにメッセージを送信できません。', ephemeral=True)
+    except discord.HTTPException as e:
+        log_line(f'周回状況パネル送信に失敗 user={interaction.user.id}: {str(e)[:120]}')
+        message = '❌ 周回状況パネルを送信できませんでした。'
+        if interaction.response.is_done():
+            return await interaction.followup.send(message, ephemeral=True)
+        return await interaction.response.send_message(message, ephemeral=True)
+
+    try:
+        message = await interaction.original_response()
+    except discord.HTTPException as e:
+        log_line(f'周回状況パネルのID取得に失敗 user={interaction.user.id}: {str(e)[:120]}')
+        return
+    bot.add_view(view, message_id=message.id)
+    if not remember_farm_dashboard_panel(
+            interaction.user.id, interaction.channel_id, message.id):
+        await interaction.followup.send(
+            '⚠️ パネルは設置しましたが、再起動後の操作復元に失敗しました。',
+            ephemeral=True)
 
 
 @bot.tree.command(name='診断', description='Botの接続・設定・ジョブ状態を確認します（管理者用）')
