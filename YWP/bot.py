@@ -216,6 +216,7 @@ USED_ORDERS = puni_pay.UsedOrderStore(_used_orders_path())
 # 今のイベントの最深部（種別 20 の面）。refresh_event_preset がイベントに合わせて書き換える
 AUTO_DECK_STAGE = 29704006       # 【裏】ステージ51（ボス）。ぷにぷに百物語 YOG48 VS HOG48（9/30 まで）
 AUTO_DECK_ASK_TIMEOUT = 120      # 「有効にしますか？」の返事待ち（秒）。過ぎたら無効で開始
+AUTO_DECK_PRIORITY_YOUKAI_ID = '9000191'  # 所持していれば自動編成で優先する極ツチノコ
 # 周回開始時と仲間が増えたときに、デッキを攻撃力の高い順に組み直す（1=する / 0=しない）。
 # rc=4 はデッキの攻撃力に対して速すぎるクリアで出るので、強いデッキほど安全に速く回せる
 STRONG_DECK = 1
@@ -4011,8 +4012,11 @@ async def auto_deck_after(job: FarmJob, c: Client, start: dict, yid: int) -> str
 
     戻り値は通知に使う結果の一文。
     """
+    priority = (AUTO_DECK_PRIORITY_YOUKAI_ID
+                if AUTO_DECK_PRIORITY_YOUKAI_ID in c.youkai_attack() else None)
     try:
-        code, out = await asyncio.to_thread(c.make_leader, yid, start)
+        code, out = await asyncio.to_thread(
+            c.make_leader, yid, start, prioritize=priority)
     except Exception as e:
         log_line(f'自動編成に失敗（周回は続ける） youkai={yid}: {str(e)[:150]}')
         return f'⚠ 編成できませんでした（{str(e)[:80]}）'
@@ -4026,6 +4030,28 @@ async def auto_deck_after(job: FarmJob, c: Client, start: dict, yid: int) -> str
         return 'リーダーにしました' + (f'（外した妖怪：{youkai_label(out)}）' if out else '')
     log_line(f'自動編成: deckEdit rc={code} youkai={yid}（デッキは変わっていない）')
     return f'⚠ 編成できませんでした（rc={code}）'
+
+
+async def ensure_auto_deck_priority(job: FarmJob, c: Client):
+    if not job.auto_deck or AUTO_DECK_PRIORITY_YOUKAI_ID not in c.youkai_attack():
+        return
+    deck, _ = c.current_deck()
+    if AUTO_DECK_PRIORITY_YOUKAI_ID in deck:
+        return
+    try:
+        code, out = await asyncio.to_thread(
+            c.make_leader,
+            AUTO_DECK_PRIORITY_YOUKAI_ID,
+            prioritize=AUTO_DECK_PRIORITY_YOUKAI_ID)
+    except Exception as e:
+        log_line(f'極ツチノコの優先編成に失敗（周回は続ける）: {str(e)[:150]}')
+        return
+    if code == 0:
+        job.leader_sets += 1
+        job.last_leader = int(AUTO_DECK_PRIORITY_YOUKAI_ID)
+        log_line(f'自動編成で極ツチノコを優先して追加（外した妖怪: {out or "なし"}）')
+    else:
+        log_line(f'極ツチノコの優先編成に失敗: deckEdit rc={code}')
 
 
 def deck_kept(c: Client) -> list[str]:
@@ -4606,6 +4632,7 @@ async def _run_job(job: FarmJob, email: str, password: str,
                     c,
                     initialize=not job.resumed or not job.rank_training_targets,
                 )
+            await ensure_auto_deck_priority(job, c)
             track_deck(job, c)
             # ミッション報酬を受け取り、上限で止まっている編成の妖怪を解放してから回す
             await receive_missions_now(job, c)

@@ -1770,24 +1770,32 @@ class Client:
                 self.save['ywp_user_youkai_deck'] = '*'.join('|'.join(r) for r in decks)
         return j.get('resultCode')
 
-    def make_leader(self, youkai_id, start=None):
+    def make_leader(self, youkai_id, start=None, prioritize=None):
         """仲間になった妖怪をリーダーにする（自動編成）
 
-        すでにデッキにいれば何もしない（並びも変えない）。
-        いなければ先頭（リーダー）に入れる。元のリーダーは残し、5体を超えるぶんは
-        リーダー以外で HP が一番低い1体を外す。
+        すでにデッキにいれば並びを保つ。priority が未編成なら追加し、
+        5体を超えるぶんは優先対象を除くリーダー以外から HP が一番低い1体を外す。
         戻り値: ('already', None) / (resultCode, 外した妖怪ID or None)
         """
         yid = str(youkai_id)
+        priority = str(prioritize) if prioritize is not None else None
         deck, hp = self.current_deck(start)
-        if yid in deck:
+        if yid in deck and (priority is None or priority in deck):
             return 'already', None
-        new, out = [yid] + deck, None
-        if len(new) > 5:
-            rest = new[1:]
-            out = min(rest, key=lambda y: hp.get(y, 0))
-            rest.remove(out)
-            new = [yid] + rest
+        if yid in deck:
+            new, out = list(deck), None
+            if priority not in new:
+                new.append(priority)
+        else:
+            new, out = [yid] + deck, None
+            if priority is not None and priority not in new:
+                new.append(priority)
+        while len(new) > 5:
+            removable = [y for y in new[1:] if y != priority]
+            if not removable:
+                break
+            out = min(removable, key=lambda y: hp.get(y, 0))
+            new.remove(out)
         time.sleep(random.uniform(2.0, 5.0))    # 実機も結果画面→編成画面の間がある
         return self.deck_edit(new), out
 
