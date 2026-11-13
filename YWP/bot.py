@@ -97,7 +97,7 @@ REQUEST_DELAY = 0.5                     # リクエスト前待機（秒・±30%
 
 WALLET_REFRESH_EVERY = 30       # 所持数を取り直す間隔（周）。1回につき再ログインが走る
 WALLET_REFRESH_NEAR = 3         # 目標まで残りこの周数を切ったら毎周確認する
-MAX_CONCURRENT_JOBS = 3         # 全体で同時に走らせるジョブ数の上限（待ちの分は別）
+MAX_CONCURRENT_JOBS = 10        # 全体で同時に走らせるジョブ数の上限（待ちの分は別）
 MAX_JOBS_PER_USER = 5           # 1ユーザーで同時に投げられるジョブ数（複垢代行用）
 PROGRESS_INTERVAL = 30.0        # DM進捗メッセージの最短更新間隔（秒）
 REFRESH_WAIT = 45.0             # 「🔄 更新」が所持数の取り直しを待つ上限（秒）
@@ -139,6 +139,7 @@ SAVE_SELECT_TIMEOUT = 180       # セーブデータが複数あるとき選択�
 
 # user_id -> [FarmJob]（複垢代行で1人が複数ジョブを並走させる）
 JOBS: dict[int, "list[FarmJob]"] = {}
+FARM_DASHBOARD_MESSAGES: dict[int, discord.Message] = {}
 # user_id -> {'udkey','userId','name','at'}  ※ディスクには書かない。再起動で消える
 SESSIONS: dict[int, dict] = {}
 SEM = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
@@ -2953,7 +2954,7 @@ class FarmJob:
         self.save_shape_prev: dict = {}    # 前回取り直したときのセーブ指紋（進行の差分用）
         self.save_detail_prev: dict = {}   # 同・進行フラグの中身（行数では動かないもの）
 
-        self.message: discord.Message | None = None   # DMの進捗メッセージ
+        self.message: discord.Message | None = None   # 旧形式の個別進捗メッセージ
         self.task: asyncio.Task | None = None         # GC防止のため参照を保持
         self._last_edit = 0.0
 
@@ -3461,11 +3462,11 @@ def result_embed(job: FarmJob, aborted: bool = False) -> discord.Embed:
 
 
 async def update_progress(job: FarmJob, force: bool = False):
-    """DMの進捗メッセージを編集
+    """旧形式の個別進捗メッセージを編集
 
     周回中は自動更新しない。毎周編集するとDiscordのレート制限に当たるため、
     節目（受付・周回開始・中止・完了）だけ編集して、それ以外は
-    「🔄 更新」ボタンが押されたときだけ更新する。
+    現在の集約パネルでは各ジョブの状態をボタン操作時に再表示する。
 
     force=False の呼び出しは何もしない。周回ループ側に点在する進捗通知を
     まとめて黙らせるため、呼び出し側は残したままここで止めている。
@@ -3484,7 +3485,7 @@ async def update_progress(job: FarmJob, force: bool = False):
 
 
 async def push_progress(job: FarmJob):
-    """「🔄 更新」用。間引きを無視して必ず編集する"""
+    """旧形式の個別進捗メッセージ用"""
     if job.message is None:
         return
     job._last_edit = time.time()
@@ -3660,15 +3661,12 @@ async def restore_jobs():
             job.paused_at = time.time()
         job.status = '♻ 再起動後の復元'
         JOBS.setdefault(user.id, []).append(job)    # 番号（jid）はそのまま
-        where = f'{job.done}戦目まで済み' + ('・**一時停止のまま**復元（▶ 再開で続きから）'
-                                        if job.is_paused else '・続きから再開します')
-        log_line(f'ジョブ復元 user={user.id} #{job.jid} stage={job.stage_ids} {where}')
+        log_line(f'ジョブ復元 user={user.id} #{job.jid} stage={job.stage_ids} '
+                 f'done={job.done} paused={job.is_paused}')
         try:
-            await user.send(f'♻ Botが再起動したので、周回 **#{job.jid}** を復元しました（{where}）。\n'
-                            '以前の進捗メッセージのボタンは使えないので、下の新しいメッセージを使ってください。')
-            job.message = await user.send(embed=progress_embed(job), view=CancelView(job))
-        except discord.HTTPException:
-            pass
+            await update_farm_dashboard(user, job.jid)
+        except discord.HTTPException as e:
+            log_line(f'復元した周回ダッシュボードのDMに失敗 user={user.id}: {str(e)[:120]}')
         job.task = asyncio.create_task(
             run_job(job, job.resume_email, None, str(job.save_uid)))
     persist_jobs()
@@ -4958,10 +4956,15 @@ async def _run_job(job: FarmJob, email: str, password: str,
 
 
 async def finish_job(job: FarmJob):
-    """進捗メッセージを結果に差し替え、完了をDM通知する"""
+    """集約パネルを更新し、ジョブ完了をDM通知する"""
     pending_update = job.inventory_update_task
     if pending_update is not None and not pending_update.done():
         pending_update.cancel()
+    if not job.interrupted:
+        try:
+            await update_farm_dashboard(job.user)
+        except discord.HTTPException as e:
+            log_line(f'周回ダッシュボード更新に失敗 user={job.user.id}: {str(e)[:120]}')
     if job.interrupted:
         # Botの再起動で止まっただけ。結果にはせず、起動後の復元を待つ
         job.status = '♻ Botの再起動で中断（起動後に自動で続きから再開します）'
@@ -5120,6 +5123,146 @@ class FoodModeView(discord.ui.View):
     @discord.ui.button(label='使わない', emoji='✖', style=discord.ButtonStyle.secondary)
     async def off(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._answer(interaction, 'off')
+
+
+class FarmDashboardView(discord.ui.View):
+    """ユーザーの周回ジョブを1つのDMから確認・操作する"""
+
+    def __init__(self, owner_id: int, selected_jid: int | None = None):
+        super().__init__(timeout=None)
+        self.owner_id = owner_id
+        self.selected_jid = selected_jid
+        jobs = jobs_of(owner_id)
+        options = [
+            discord.SelectOption(
+                label=f'#{job.jid} {job.player_name or job.stage_id}'[:100],
+                value=str(job.jid),
+                description=f'{job.status}・成功{job.success}/失敗{job.fail}'[:100],
+                default=job.jid == selected_jid,
+            )
+            for job in jobs[:MAX_JOBS_PER_USER]
+        ]
+        if options:
+            select = discord.ui.Select(
+                placeholder='詳細を表示・操作するアカウントを選択',
+                options=options,
+                custom_id=f'ywp:dashboard:select:{owner_id}',
+                row=0,
+            )
+            select.callback = self._select_job
+            self.add_item(select)
+        self.add_item(discord.ui.Button(
+            label='情報更新', emoji='🔄', style=discord.ButtonStyle.primary,
+            custom_id=f'ywp:dashboard:refresh:{owner_id}', row=1,
+            disabled=not jobs))
+        self.children[-1].callback = self._refresh_job
+        self.add_item(discord.ui.Button(
+            label='一時停止 / 再開', emoji='⏯', style=discord.ButtonStyle.secondary,
+            custom_id=f'ywp:dashboard:toggle:{owner_id}', row=1,
+            disabled=selected_jid is None))
+        self.children[-1].callback = self._toggle_job
+        self.add_item(discord.ui.Button(
+            label='中止', emoji='⏹', style=discord.ButtonStyle.danger,
+            custom_id=f'ywp:dashboard:cancel:{owner_id}', row=1,
+            disabled=selected_jid is None))
+        self.children[-1].callback = self._cancel_job
+        self.add_item(discord.ui.Button(
+            label='ドロップ・好物', emoji='🍙', style=discord.ButtonStyle.secondary,
+            custom_id=f'ywp:dashboard:food:{owner_id}', row=1,
+            disabled=selected_jid is None))
+        self.children[-1].callback = self._food_job
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                'この周回パネルを操作できるのは作成した本人だけです。',
+                ephemeral=True)
+            return False
+        return True
+
+    async def _select_job(self, interaction: discord.Interaction):
+        data = interaction.data or {}
+        values = data.get('values', [])
+        if not values:
+            return await interaction.response.send_message(
+                '詳細を表示するアカウントを選択してください。', ephemeral=True)
+        try:
+            jid = int(values[0])
+        except (TypeError, ValueError):
+            return await interaction.response.send_message(
+                '選択したジョブを読み取れませんでした。', ephemeral=True)
+        if find_job(self.owner_id, jid) is None:
+            return await interaction.response.send_message(
+                '選択したジョブはすでに終了しています。', ephemeral=True)
+        await interaction.response.edit_message(
+            embed=farm_dashboard_embed(self.owner_id, jid),
+            view=FarmDashboardView(self.owner_id, jid))
+
+    def _selected_job(self, interaction: discord.Interaction) -> FarmJob | None:
+        if self.selected_jid is None:
+            return None
+        job = find_job(self.owner_id, self.selected_jid)
+        if job is None or job.cancel.is_set():
+            return None
+        return job
+
+    async def _refresh_job(self, interaction: discord.Interaction):
+        job = self._selected_job(interaction)
+        if job is None:
+            await interaction.response.edit_message(
+                embed=farm_dashboard_embed(self.owner_id),
+                view=FarmDashboardView(self.owner_id))
+            return
+        await interaction.response.defer()
+        job.refreshed.clear()
+        job.want_refresh = True
+        note = None
+        try:
+            await asyncio.wait_for(job.refreshed.wait(), timeout=REFRESH_WAIT)
+        except asyncio.TimeoutError:
+            note = f'{REFRESH_WAIT:g}秒以内に所持数を更新できませんでした。'
+        embed = farm_dashboard_embed(self.owner_id, job.jid)
+        if note:
+            embed.add_field(name='更新結果', value=note, inline=False)
+        await interaction.edit_original_response(
+            embed=embed, view=FarmDashboardView(self.owner_id, job.jid))
+
+    async def _toggle_job(self, interaction: discord.Interaction):
+        job = self._selected_job(interaction)
+        if job is None:
+            return await interaction.response.send_message(
+                '一時停止・再開するアカウントを選択してください。', ephemeral=True)
+        if job.is_paused:
+            resume_job(job)
+        else:
+            pause_job(job)
+        await interaction.response.edit_message(
+            embed=farm_dashboard_embed(self.owner_id, job.jid),
+            view=FarmDashboardView(self.owner_id, job.jid))
+
+    async def _cancel_job(self, interaction: discord.Interaction):
+        job = self._selected_job(interaction)
+        if job is None:
+            return await interaction.response.send_message(
+                '中止するアカウントを選択してください。', ephemeral=True)
+        if not job.cancel.is_set():
+            job.cancel.set()
+            job.status = '⏹ 中止中...'
+        await interaction.response.edit_message(
+            embed=farm_dashboard_embed(self.owner_id, job.jid),
+            view=FarmDashboardView(self.owner_id, job.jid))
+
+    async def _food_job(self, interaction: discord.Interaction):
+        job = self._selected_job(interaction)
+        if job is None:
+            return await interaction.response.send_message(
+                '設定するアカウントを選択してください。', ephemeral=True)
+        await interaction.response.send_message(
+            f'🍙 **#{job.jid}** の妖怪ドロップ・好物を設定してください'
+            f'（現在：**{"有効" if job.drop_enabled else "無効"}**'
+            + (f'・好物 {FOOD_MODES.get(job.food_mode, job.food_mode)}' if job.drop_enabled else '')
+            + '）。次のバトルから反映されます。',
+            view=FoodModeView(self.owner_id, job), ephemeral=True)
 
 
 class CancelView(discord.ui.View):
@@ -5323,19 +5466,53 @@ class JobsCancelView(discord.ui.View):
 def jobs_list_embed(jobs: list[FarmJob]) -> discord.Embed:
     """複数ジョブのサマリー（状況確認・/周回状況 用）"""
     e = discord.Embed(
-        title=f'🎮 自動周回 実行中（{len(jobs)}件）',
+        title=f'🎮 自動周回 実行状況（{len(jobs)}件）',
         color=COLOR_RUN,
         timestamp=datetime.now(),
     )
-    for job in jobs[:10]:
+    if not jobs:
+        e.description = '現在、実行中の周回はありません。'
+    for job in jobs[:MAX_JOBS_PER_USER]:
         name = (f'`#{job.jid}` 「{job.preset_name}」 `{job.stage_id}`' if job.is_preset
                 else f'`#{job.jid}` ステージ `{job.stage_id}`')
         if job.player_name:
             name += f'（{job.player_name}）'
-        e.add_field(name=name, value=f'{job_headline(job)}\n{job.status}',
+        remaining = job.remaining
+        remaining_text = ('不明' if remaining is None else
+                          '上限なし' if job.count is None else f'{remaining}{job.unit}')
+        e.add_field(name=name,
+                    value=(f'状態: **{job.status}**\n{job_headline(job)}\n'
+                           f'✅ 成功 {job.success} / ❌ 失敗 {job.fail} / '
+                           f'残り {remaining_text}'),
                     inline=False)
-    e.set_footer(text='下のボタンで個別に中止できます')
+    e.set_footer(text='プルダウンでアカウントを選ぶと詳細と操作を表示します')
     return e
+
+
+def farm_dashboard_embed(user_id: int, selected_jid: int | None = None) -> discord.Embed:
+    jobs = jobs_of(user_id)
+    if selected_jid is not None:
+        selected = find_job(user_id, selected_jid)
+        if selected is not None:
+            return progress_embed(selected)
+    return jobs_list_embed(jobs)
+
+
+async def update_farm_dashboard(user: discord.abc.User, selected_jid: int | None = None):
+    """ユーザーごとの集約DMを作成または更新する"""
+    user_id = user.id
+    message = FARM_DASHBOARD_MESSAGES.get(user_id)
+    embed = farm_dashboard_embed(user_id, selected_jid)
+    view = FarmDashboardView(user_id, selected_jid)
+    if message is not None:
+        try:
+            await message.edit(embed=embed, view=view)
+            return message
+        except discord.NotFound:
+            FARM_DASHBOARD_MESSAGES.pop(user_id, None)
+    message = await user.send(embed=embed, view=view)
+    FARM_DASHBOARD_MESSAGES[user_id] = message
+    return message
 
 
 # ============================================================================
@@ -5580,14 +5757,19 @@ class FarmModal(discord.ui.Modal, title='ぷにぷに 自動周回'):
 
         # DMが開いているか先に確認する（結果はDMで返すため）
         try:
-            job.message = await interaction.user.send(
-                embed=progress_embed(job), view=CancelView(job))
+            await update_farm_dashboard(interaction.user, job.jid)
         except discord.Forbidden:
             drop_job(job)
             return await interaction.followup.send(
                 '❌ DMを送れませんでした。\n'
                 'サーバー設定 → プライバシー設定 →「サーバーメンバーからのDMを許可する」'
                 'をONにしてから、もう一度お試しください。',
+                ephemeral=True)
+        except discord.HTTPException as e:
+            drop_job(job)
+            log_line(f'周回ダッシュボードのDMに失敗 user={interaction.user.id}: {str(e)[:120]}')
+            return await interaction.followup.send(
+                '❌ 周回状況パネルをDMできなかったため、開始を中止しました。',
                 ephemeral=True)
 
         profile_saved = save_last_farm(interaction.user.id, {
@@ -7099,12 +7281,17 @@ async def _start_last_farm(interaction: discord.Interaction, profile: dict):
     add_job(job)
 
     try:
-        job.message = await interaction.user.send(
-            embed=progress_embed(job), view=CancelView(job))
+        await update_farm_dashboard(interaction.user, job.jid)
     except discord.Forbidden:
         drop_job(job)
         return await interaction.followup.send(
             '❌ DMを送れません。DMを許可してからもう一度お試しください。', ephemeral=True)
+    except discord.HTTPException as e:
+        drop_job(job)
+        log_line(f'周回ダッシュボードのDMに失敗 user={interaction.user.id}: {str(e)[:120]}')
+        return await interaction.followup.send(
+            '❌ 周回状況パネルをDMできなかったため、開始を中止しました。',
+            ephemeral=True)
 
     job.task = asyncio.create_task(run_job(job, email, None, save_uid))
     stage_text = (f'プリセット **{job.preset_name}**（{len(stage_ids)}ステージ）'
