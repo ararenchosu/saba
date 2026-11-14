@@ -4039,7 +4039,7 @@ async def auto_deck_after(job: FarmJob, c: Client, start: dict, yid: int) -> str
 
 
 async def ensure_auto_deck_priority(job: FarmJob, c: Client):
-    if not job.auto_deck or AUTO_DECK_PRIORITY_YOUKAI_ID not in c.youkai_attack():
+    if AUTO_DECK_PRIORITY_YOUKAI_ID not in c.youkai_attack():
         return
     deck, _ = c.current_deck()
     if AUTO_DECK_PRIORITY_YOUKAI_ID not in deck:
@@ -4280,6 +4280,7 @@ async def on_befriend(job: FarmJob, c: Client, start: dict, result: dict):
     if not job.auto_deck:
         # 新しい妖怪がデッキより強ければ入れ替わる（同じ並びなら通信しない）
         await sort_deck_now(job, c, '仲間が増えた')
+        await ensure_auto_deck_priority(job, c)
         return
     outcome = await auto_deck_after(job, c, start, yid)
     try:
