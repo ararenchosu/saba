@@ -4280,7 +4280,6 @@ def closed_menu_stages(c: Client) -> set[int]:
     mf = c.progress_detail().get('ywp_user_menufunc', {})
     return {s for m, s in MENU_UNLOCK_STAGES if mf.get(str(m)) == '0'}
 
-
 def set_food_policy(job: FarmJob, c: Client):
     """好物を使う面と使い方を Client に教える。判定はバトルのたびに最新のメニューで行う
 
