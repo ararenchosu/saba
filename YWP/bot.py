@@ -87,6 +87,10 @@ bot = commands.Bot(
 # 設定
 # ============================================================================
 
+# ============================================================================
+# 設定
+# ============================================================================
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 JST = ZoneInfo('Asia/Tokyo')
 CONFIG_FILE = os.path.join(BASE_DIR, 'config.json')
@@ -118,6 +122,35 @@ COLOR_RUN = 0xFEE75C
 COLOR_OK = 0x57F287
 COLOR_WARN = 0xFAA61A
 COLOR_NG = 0xED4245
+
+# ============================================================================
+# 30104006 専用の特殊編成設定
+# ============================================================================
+
+# 特殊編成を適用するステージID
+SPECIAL_STAGE_ID = 30104006
+
+# 極ツチノコの妖怪ID（SSSランク）
+# ※実際のIDに置き換えてください
+TSUCHINOKO_ID = "5001036"  # 仮ID
+
+# 入れ替え対象の妖怪ID
+REPLACE_YOUKAI_ID = "9002985"
+
+# Eランク妖怪のIDリスト（ご指定の10体）
+# ※実際のマスタから確認して正確なIDに置き換えてください
+E_RANK_YOUKAI_IDS = [
+    "2197000",  # ジミー (仮)
+    "2184000",  # ネガティブーン (仮)
+    "2276000",  # キズナメコ (仮)
+    "9000391",  # ワカメくん (仮)
+    "4225000",  # ひも爺 (仮)
+    "2149000",  # セミまる (仮)
+    "2255000",  # うらや飯 (仮)
+    "2189000",  # グレるりん (仮)
+    "2140000",  # ムリカベ (仮)
+    "2135000",  # だるだるま (仮)
+]
 
 # Botのオーナー。サーバーの権限に関係なく管理系の操作（パネル設置・設定変更）ができる
 # 自分のDiscordユーザーIDを入れる（例: 123456789012345678,）。空でもサーバー管理権限があれば操作できる
@@ -4074,6 +4107,87 @@ async def ensure_auto_deck_priority(job: FarmJob, c: Client):
     log_line(f'自動編成: 極ツチノコを5枠目に固定 {deck} → {ordered}')
 
 
+# ============================================================================
+# デッキ編成関連の関数
+# ============================================================================
+
+async def special_deck_for_30104006(job: FarmJob, c: Client, why: str):
+    """ステージ 30104006 専用の特殊編成ロジック"""
+    
+    # 現在の手持ち妖怪を取得
+    owned_youkai = {r[0] for r in rows(c.save.get('ywp_user_youkai')) if r}
+    
+    # デッキのベースを作成
+    deck = []
+    
+    # 1. 9002985 を所持している場合、Eランクのどれかと入れ替える（先に処理）
+    e_rank_pool = E_RANK_YOUKAI_IDS.copy()
+    if REPLACE_YOUKAI_ID in owned_youkai:
+        # Eランクのリストから1体を外す（ここでは最後の1体を外す例）
+        if e_rank_pool:
+            e_rank_pool.pop()
+        deck.append(REPLACE_YOUKAI_ID)
+    
+    # 2. Eランク妖怪を4体まで埋める（極ツチノコの枠を1つ空けるため）
+    for eid in e_rank_pool:
+        if len(deck) >= 4:
+            break
+        if eid in owned_youkai and eid not in deck:
+            deck.append(eid)
+    
+    # 3. 極ツチノコがいる場合は、必ず5枠目（最後）に追加
+    if TSUCHINOKO_ID in owned_youkai and TSUCHINOKO_ID not in deck:
+        # 4枠目まで埋まっていない場合は、他の妖怪で埋める
+        if len(deck) < 4:
+            atk = c.youkai_attack()
+            others = sorted([y for y in owned_youkai if y not in deck and y != TSUCHINOKO_ID], key=lambda y: -atk.get(y, 0))
+            for yid in others:
+                if len(deck) >= 4:
+                    break
+                deck.append(yid)
+        deck.append(TSUCHINOKO_ID)
+    else:
+        # 極ツチノコがいない場合、5枠目まで埋める
+        if len(deck) < 5:
+            atk = c.youkai_attack()
+            others = sorted([y for y in owned_youkai if y not in deck], key=lambda y: -atk.get(y, 0))
+            for yid in others:
+                if len(deck) >= 5:
+                    break
+                deck.append(yid)
+    
+    # 4. もしEランク妖怪が足りず4枠に満たない場合、他の手持ち妖怪で埋める
+    if len(deck) < 5 and TSUCHINOKO_ID not in deck:
+        atk = c.youkai_attack()
+        others = sorted([y for y in owned_youkai if y not in deck], key=lambda y: -atk.get(y, 0))
+        for yid in others:
+            if len(deck) >= 5:
+                break
+            deck.append(yid)
+    
+    # 5. デッキを適用
+    if not deck:
+        log_line(f'特殊編成（30104006）: 条件を満たす妖怪が1体もいません')
+        return
+    
+    old, _ = c.current_deck()
+    if old == deck:
+        return  # すでに同じ並びなら通信しない
+        
+    try:
+        code, _, new = await asyncio.to_thread(c.deck_edit, deck)
+    except Exception as e:
+        log_line(f'特殊編成（30104006）に失敗（周回は続ける）: {str(e)[:150]}')
+        return
+        
+    if code == 0:
+        job.deck_sorts += 1
+        job.deck_order = list(new)
+        log_line(f'特殊編成（30104006）: {old} → {new} (極ツチノコ: {TSUCHINOKO_ID in deck}, 9002985: {REPLACE_YOUKAI_ID in deck})')
+    else:
+        log_line(f'特殊編成（30104006）: deckEdit rc={code}（デッキは変わっていない）')
+
+
 def deck_kept(c: Client) -> list[str]:
     """今のデッキが「組み直さない条件」（STRONG_DECK_KEEP_*）を満たすなら、その妖怪ID。満たさなければ []"""
     if not STRONG_DECK_KEEP_COUNT:
@@ -4089,8 +4203,43 @@ def deck_kept(c: Client) -> list[str]:
 
 async def sort_deck_now(job: FarmJob, c: Client, why: str):
     """デッキを攻撃力の高い順に組み直す（STRONG_DECK）。失敗しても周回は続ける
-
+    
     自動編成中は今のリーダー（仲間にした妖怪）をそのままにして、残り4体を強い順にする。
+    """
+    if not STRONG_DECK:
+        return
+        
+    # ★ 30104006 の場合は特殊編成を行う
+    if job.stage_id == SPECIAL_STAGE_ID:
+        await special_deck_for_30104006(job, c, why)
+        return
+
+    # 以下、既存の処理（攻撃力順の組み替え）
+    strong = deck_kept(c)
+    if strong:
+        log_line(f'強い順の編成をしない（{why}）: {rank_label(STRONG_DECK_KEEP_RANK)}以上が'
+                 f'{len(strong)}体いる {strong}')
+        return
+    leader = None
+    if job.auto_deck:
+        deck, _ = c.current_deck()
+        leader = deck[0] if deck else None
+    try:
+        code, old, new = await asyncio.to_thread(c.sort_deck, leader)
+    except Exception as e:
+        log_line(f'強い順の編成に失敗（周回は続ける・{why}）: {str(e)[:150]}')
+        return
+    if code == 'same':
+        return
+    if code != 0:
+        log_line(f'強い順の編成: deckEdit rc={code}（{why}・デッキは変わっていない）')
+        return
+    # 成功時の処理（1回だけ）
+    job.deck_sorts += 1
+    job.deck_order = list(new)
+    atk = c.youkai_attack()
+    log_line(f'強い順の編成（{why}）: {old} → {new} 攻撃力 '
+             f'{sum(atk.get(y, 0) for y in old)} → {sum(atk.get(y, 0) for y in new)}')
     """
     if not STRONG_DECK:
         await ensure_auto_deck_priority(job, c)
