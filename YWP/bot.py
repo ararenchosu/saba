@@ -219,7 +219,7 @@ AUTO_DECK_ASK_TIMEOUT = 120      # 「有効にしますか？」の返事待ち
 AUTO_DECK_PRIORITY_YOUKAI_ID = '9000191'  # 所持していれば自動編成の5枠目に固定する極ツチノコ
 # 周回開始時と仲間が増えたときに、デッキを攻撃力の高い順に組み直す（1=する / 0=しない）。
 # rc=4 はデッキの攻撃力に対して速すぎるクリアで出るので、強いデッキほど安全に速く回せる
-STRONG_DECK = 1
+STRONG_DECK = 0
 # ただし今のデッキに、このランク以上の妖怪が STRONG_DECK_KEEP_COUNT 体以上いれば組み直さない
 # （0 体にすると、この判定はしない）。ランクは RANK_NAMES の番号（10=ZZ）
 STRONG_DECK_KEEP_RANK = 10
