@@ -97,8 +97,8 @@ REQUEST_DELAY = 0.5                     # リクエスト前待機（秒・±30%
 
 WALLET_REFRESH_EVERY = 30       # 所持数を取り直す間隔（周）。1回につき再ログインが走る
 WALLET_REFRESH_NEAR = 3         # 目標まで残りこの周数を切ったら毎周確認する
-MAX_CONCURRENT_JOBS = 20        # 全体で同時に走らせるジョブ数の上限（待ちの分は別）
-MAX_JOBS_PER_USER = 20           # 1ユーザーで同時に投げられるジョブ数（複垢代行用）
+MAX_CONCURRENT_JOBS = 50        # 全体で同時に走らせるジョブ数の上限（待ちの分は別）
+MAX_JOBS_PER_USER = 50           # 1ユーザーで同時に投げられるジョブ数（複垢代行用）
 PROGRESS_INTERVAL = 30.0        # DM進捗メッセージの最短更新間隔（秒）
 REFRESH_WAIT = 45.0             # 「🔄 更新」が所持数の取り直しを待つ上限（秒）
 FATAL_CODES = (202, 30)         # これが出たら周回を打ち切る
