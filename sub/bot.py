@@ -27,6 +27,7 @@ from sub import helpcmd  # noqa: F401  （/help コマンド一覧）
 from sub import invites  # noqa: F401  （招待トラッキング）
 from sub import casino  # noqa: F401  （カジノ）
 from sub import lottery  # noqa: F401  （宝くじ）
+from sub import omikuji  # noqa: F401  （おみくじ）
 from sub.gate import RulesView, RolePanelView
 from sub.recruit import RecruitPanelView, RecruitCardView, expire_recruitments
 from sub.intro import IntroPanelView
