@@ -16,7 +16,13 @@ import random
 
 import discord
 
-from sub.core import bot, store, requires, features_enabled
+from sub.core import bot, store, requires
+
+try:
+    from sub.core import features_enabled
+except ImportError:  # 旧バージョンの core.py でも動くように
+    def features_enabled(guild_id):
+        return True
 
 # (ラベル, 絵文字, 確率%, 一言リスト)
 STANDARD = [
