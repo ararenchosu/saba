@@ -99,7 +99,7 @@ def _record_embed(user, item, values, jset=None) -> discord.Embed:
     title = template.replace("{item}", item["label"]).replace(
         "{user}", user.display_name)
     embed = discord.Embed(title=title[:256], color=discord.Color.gold())
-    embed.add_field(name="記録者", value=user.mention, inline=False)
+    embed.add_field(name="依頼者", value=user.mention, inline=False)
     for label, value in values.items():
         text = str(value).strip()
         embed.add_field(name=label, value=text[:1024] if text else "（未記入）",
@@ -121,13 +121,22 @@ async def _post_record(interaction, item, values):
             target = guild.get_channel(int(loc["channel_id"]))
     if target is None:
         target = interaction.channel
+    posted = False
     if target is not None:
         try:
             await target.send(
                 embed=_record_embed(interaction.user, item, values, jset))
+            posted = True
         except discord.HTTPException:
             pass
     await log_event(guild, f"🏆 実績記録: {item['label']} by {interaction.user.mention}")
+    # 記録先がパネルと同じチャンネルなら、投稿の直後にパネルを一番下へ置き直す
+    # （記録の投稿は bot 自身の投稿なので、通常のメッセージ検知では対象外のため）
+    if posted and target is not None:
+        loc = store.cfg(guild.id).get("panels", {}).get("jisseki") or {}
+        if (loc.get("channel_id") and int(loc["channel_id"]) == target.id
+                and features_enabled(guild.id)):
+            asyncio.ensure_future(_repost_now(guild))
 
 
 # ---------------- パネル ----------------
