@@ -80,7 +80,7 @@ async def cmd_help(interaction: discord.Interaction):
             "`/setup_roles` ロール選択パネル設置\n"
             "`/setup_recruit` 募集パネル設置\n"
             "`/setup_intro` 自己紹介パネル設置 / `/setintro` 自己紹介の送信先設定\n"
-            "`/setwelcome` / `/setlog` 投稿先チャンネル設定\n"
+            "`/setwelcome` / `/setlog` 投稿先チャンネル設定 / `/welcomeoff` 入退室メッセージを止める / `/boton` `/botoff` 機能のオン・オフ\n"
             "`/setup_gate` 認証ゲートの権限を一括適用\n"
             "`/settings` 設定パネル（項目・ロール・NGワード編集）"
         ),
@@ -146,29 +146,13 @@ async def on_tree_error(interaction: discord.Interaction, error: app_commands.Ap
 
 
 # ---------------- ステータスのローテーション ----------------
-# 15秒ごとに「稼働中サーバー数 → 各コマンドの説明」を順番に表示する。
-# 管理者向けコマンドは末尾に（管理者用）を付ける（オーナー専用コマンドはその旨を付ける）。
+# 15秒ごとに「所属サーバー数」と「コマンド数」の2つだけを順番に表示する。
 
 def _status_entries():
-    entries = [f"{len(bot.guilds)} 件のサーバーで稼働中 | /bothelp でコマンド一覧"]
-    for cmd in bot.tree.get_commands():
-        desc = cmd.description or ""
-        label = ""
-        if desc.endswith("（サーバーオーナー専用）"):
-            label = "（サーバーオーナー専用）"
-            desc = desc[: -len("（サーバーオーナー専用）")]
-        elif desc.endswith("（管理者用）"):
-            label = "（管理者用）"
-            desc = desc[: -len("（管理者用）")]
-        elif desc.endswith("（管理系）"):
-            label = "（管理者用）"
-            desc = desc[: -len("（管理系）")]
-        elif desc.endswith("・管理系）"):
-            # 例:「（ユーザーID指定・管理系）」→「（ユーザーID指定）」＋（管理者用）
-            label = "（管理者用）"
-            desc = desc[: -len("・管理系）")] + "）"
-        entries.append(f"/{cmd.name}：{desc}{label}"[:128])
-    return entries
+    return [
+        f"{len(bot.guilds)} 件のサーバーで稼働中",
+        f"{len(bot.tree.get_commands())} 件のコマンド",
+    ]
 
 
 _status_index = 0
@@ -221,7 +205,7 @@ async def on_ready():
     if not expire_recruitments.is_running():
         expire_recruitments.start()
     try:
-        await bot.change_presence(activity=discord.Game(name=f"{len(bot.guilds)} 件のサーバーで稼働中 | /bothelp でコマンド一覧"))
+        await bot.change_presence(activity=discord.Game(name=f"{len(bot.guilds)} 件のサーバーで稼働中"))
     except Exception:
         pass
     if not rotate_status.is_running():
