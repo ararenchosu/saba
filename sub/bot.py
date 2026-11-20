@@ -29,10 +29,12 @@ from sub import casino  # noqa: F401  （カジノ）
 from sub import lottery  # noqa: F401  （宝くじ）
 from sub import omikuji  # noqa: F401  （おみくじ）
 from sub import chusen  # noqa: F401  （抽選・締切日時指定）
+from sub import jisseki  # noqa: F401  （実績の記入パネル）
 from sub.gate import RulesView, RolePanelView
 from sub.recruit import RecruitPanelView, RecruitCardView, expire_recruitments
 from sub.intro import IntroPanelView
 from sub.tickets import TicketPanelView, TicketCloseView
+from sub.jisseki import JissekiPanelView
 from sub.invites import InvitePanelView
 from sub.casino import CasinoPanelView
 from sub.lottery import LotteryPanelView
@@ -237,6 +239,7 @@ async def on_ready():
     bot.add_view(InvitePanelView())
     bot.add_view(CasinoPanelView())
     bot.add_view(LotteryPanelView())
+    bot.add_view(JissekiPanelView())
     # 進行中の投票・抽選のボタンを復旧
     for mid in utility_store.data.get("polls", {}):
         try:
