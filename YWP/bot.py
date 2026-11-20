@@ -5675,97 +5675,6 @@ class FarmLoginCtx:
                  'preset_name', 'at')
 
 
-# ============================================================================
-# メールアドレス付け替え（データ移行）用のUIとロジック
-# ============================================================================
-
-class UdkeyTransferModal(discord.ui.Modal, title='メールアドレスの付け替え（データ移行）'):
-    old_email = discord.ui.TextInput(
-        label='現在のメールアドレス',
-        placeholder='example@example.com',
-        max_length=120
-    )
-    old_password = discord.ui.TextInput(
-        label='現在のパスワード',
-        placeholder='現在のパスワード',
-        max_length=100
-    )
-    new_email = discord.ui.TextInput(
-        label='新しいメールアドレス',
-        placeholder='new@example.com',
-        max_length=120
-    )
-    new_password = discord.ui.TextInput(
-        label='新しいパスワード',
-        placeholder='新しいパスワード',
-        max_length=100
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        
-        old_email = self.old_email.value.strip()
-        old_password = self.old_password.value
-        new_email = self.new_email.value.strip()
-        new_password = self.new_password.value
-
-        await interaction.followup.send('🔄 付け替え処理を開始します...', ephemeral=True)
-
-        try:
-            # 1. 古いアカウントにログインしてUDkeyを取得
-            from ywp_auto import _load_udkeys, save_udkey_for
-            udkeys = _load_udkeys()
-            old_udkey = udkeys.get(old_email)
-            
-            if not old_udkey:
-                # まだ登録されていない場合は、今ログインして取得
-                c_old, accs = await asyncio.to_thread(login_email_prepared, old_email, old_password)
-                old_udkey = c_old.udkey
-            else:
-                # 既存のUDkeyがある場合は、再ログインしてセッションを確立
-                c_old = Client(old_udkey)
-                await asyncio.to_thread(c_old.login)
-
-            # 2. 新しいメールアドレスでLEVEL5 IDを作成（捨てメール等ではなく、直接登録）
-            # ※ create_level5_account は捨てメールを使うため、ここでは直接本登録のフローを走らせます。
-            # 実装の簡略化のため、ここでは「既に作成済みの新規LEVEL5 ID」を前提とするか、
-            # 別途「新規垢作成」で作った垢のメールを使う形が安全です。
-            
-            # --- ここからはAPIの仕様に合わせたOAuth連携の再実行 ---
-            # link_email は「UDkeyにメール/パスを連携する」関数です。
-            # 既存のUDkeyに対して新しいメールを連携させることで、実質的な「付け替え」になります。
-            
-            await interaction.followup.send('🔗 新しいメールアドレスとの連携を試みます...', ephemeral=True)
-            
-            # link_email を使って、古いUDkeyに新しいメールを紐付ける
-            # （※サーバー側が「既に連携済み」として弾く可能性があります）
-            result = await asyncio.to_thread(link_email, old_udkey, new_email, new_password)
-            
-            # 成功したら、udkeys.json を新しいメールで上書き保存する
-            save_udkey_for(new_email, old_udkey)
-            
-            await interaction.followup.send(
-                f'✅ **付け替え処理が完了しました！**\n'
-                f'新しいメール: `{new_email}`\n'
-                f'このメールアドレスで今後ログイン・周回してください。\n\n'
-                f'※古いメールアドレス（`{old_email}`）は使用できなくなります。',
-                ephemeral=True
-            )
-
-        except Exception as e:
-            await interaction.followup.send(
-                f'❌ 付け替えに失敗しました: `{str(e)[:250]}`\n\n'
-                '**考えられる原因:**\n'
-                '・新しいメールアドレスのLEVEL5 IDがまだ作成されていない\n'
-                '・既に別の垢と連携されている\n'
-                '・サーバー側の連携制限に引っかかった',
-                ephemeral=True
-            )
-
-    async def on_error(self, interaction: discord.Interaction, error: Exception):
-        await interaction.followup.send(f'❌ エラー: `{str(error)[:200]}`', ephemeral=True)
-
-
 class FarmModal(discord.ui.Modal, title='ぷにぷに 自動周回'):
     """周回設定。ctx（ログイン済み）があるときはメール/パス欄の代わりに
     セーブデータを名前から選ぶセレクトを出す（モーダルは5コンポーネントまで）"""
@@ -8392,6 +8301,146 @@ def hitodama_test_embed() -> discord.Embed:
                'エラー（rc=32）になりますが、Botが再ログインして自動で続行します'),
         inline=False,
     )
+    return e
+
+
+# ============================================================================
+# UDkey管理・付け替え用のUIクラス
+# ============================================================================
+
+class UdkeyRegisterModal(discord.ui.Modal, title='UDkeyの登録・付け替え'):
+    email = discord.ui.TextInput(
+        label='メールアドレス',
+        placeholder='example@example.com',
+        max_length=120
+    )
+    password = discord.ui.TextInput(
+        label='パスワード',
+        placeholder='ログイン用パスワード（保存されません）',
+        max_length=100
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        email = self.email.value.strip()
+        password = self.password.value
+
+        try:
+            c, accs = await asyncio.to_thread(login_email_prepared, email, password)
+            if not accs:
+                return await interaction.followup.send('❌ このアカウントにはセーブデータがありません。', ephemeral=True)
+            
+            uid = accs[0].get('userId')
+            name = accs[0].get('playerName')
+            udkey = c.udkey
+            
+            remember_session(interaction.user.id, c, name)
+            msg = (
+                f'✅ **UDkeyの登録が完了しました！**\n'
+                f'**メール**: `{email}`\n'
+                f'**プレイヤー**: {name} (`{uid}`)\n'
+                f'**UDkey**: `{udkey[:10]}...`\n\n'
+                f'この垢で周回するには、下の「周回開始」ボタンから開始してください。'
+            )
+            await interaction.followup.send(msg, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f'❌ ログイン失敗: `{str(e)[:200]}`', ephemeral=True)
+
+
+class UdkeyTransferModal(discord.ui.Modal, title='メールアドレスの付け替え（データ移行）'):
+    old_email = discord.ui.TextInput(label='現在のメールアドレス', max_length=120)
+    old_password = discord.ui.TextInput(label='現在のパスワード', max_length=100)
+    new_email = discord.ui.TextInput(label='新しいメールアドレス', max_length=120)
+    new_password = discord.ui.TextInput(label='新しいパスワード', max_length=100)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        old_email = self.old_email.value.strip()
+        old_password = self.old_password.value
+        new_email = self.new_email.value.strip()
+        new_password = self.new_password.value
+
+        await interaction.followup.send('🔄 付け替え処理を開始します...', ephemeral=True)
+
+        try:
+            from ywp_auto import _load_udkeys, save_udkey_for
+            udkeys = _load_udkeys()
+            old_udkey = udkeys.get(old_email)
+            
+            if not old_udkey:
+                c_old, _ = await asyncio.to_thread(login_email_prepared, old_email, old_password)
+                old_udkey = c_old.udkey
+            else:
+                c_old = Client(old_udkey)
+                await asyncio.to_thread(c_old.login)
+
+            await interaction.followup.send('🔗 新しいメールアドレスとの連携を試みます...', ephemeral=True)
+            result = await asyncio.to_thread(link_email, old_udkey, new_email, new_password)
+            save_udkey_for(new_email, old_udkey)
+            
+            await interaction.followup.send(
+                f'✅ **付け替え処理が完了しました！**\n'
+                f'新しいメール: `{new_email}`\n'
+                f'このメールアドレスで今後ログイン・周回してください。',
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.followup.send(
+                f'❌ 付け替えに失敗しました: `{str(e)[:250]}`\n\n'
+                '**考えられる原因:**\n'
+                '・新しいメールアドレスのLEVEL5 IDがまだ作成されていない\n'
+                '・既に別の垢と連携されている',
+                ephemeral=True
+            )
+
+
+class UdkeyManageView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label='UDkeyを登録・付け替え', style=discord.ButtonStyle.primary, emoji='🔑', custom_id='ywp:udkey:register')
+    async def register(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(UdkeyRegisterModal())
+
+    @discord.ui.button(label='メアドの付け替え（データ移行）', style=discord.ButtonStyle.success, emoji='🔄', custom_id='ywp:udkey:transfer')
+    async def transfer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(UdkeyTransferModal())
+
+    @discord.ui.button(label='登録済み一覧を見る', style=discord.ButtonStyle.secondary, emoji='📋', custom_id='ywp:udkey:list')
+    async def list_udkeys(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            from ywp_auto import _load_udkeys
+            data = _load_udkeys()
+            if not data:
+                return await interaction.followup.send('📭 登録されているアカウントはありません。', ephemeral=True)
+            
+            msg = '**【登録済みアカウント一覧】**\n'
+            for i, (email, udkey) in enumerate(list(data.items())[:20]):
+                msg += f'`{i+1}.` **{email}** (UDkey: `{udkey[:8]}...`)\n'
+            if len(data) > 20:
+                msg += f'\n...ほか {len(data)-20} 件'
+            await interaction.followup.send(msg, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f'❌ 一覧の取得に失敗しました: `{str(e)}`', ephemeral=True)
+
+
+def udkey_panel_embed() -> discord.Embed:
+    e = discord.Embed(
+        title='🔑 UDkey 付け替え・管理パネル',
+        description=(
+            'ここでは既存のぷにぷにアカウントのUDkeyをBotに登録（付け替え）できます。\n\n'
+            '**🔑 UDkeyを登録・付け替え**\n'
+            'メールアドレスとパスワードを入力して、Botに垢を紐付けます。\n'
+            '※パスワードは保存されません。\n\n'
+            '**🔄 メアドの付け替え（データ移行）**\n'
+            '新しいメールアドレスにゲームデータを移行します。\n\n'
+            '**📋 登録済み一覧を見る**\n'
+            '現在Botが覚えている垢の一覧を表示します。'
+        ),
+        color=COLOR_INFO
+    )
+    e.set_footer(text='登録後は通常の「周回開始」パネルから周回を開始できます')
     return e
 
 
