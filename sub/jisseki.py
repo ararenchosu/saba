@@ -3,7 +3,7 @@
 - /setup_jisseki: このチャンネルに実績パネルを設置（管理者用）
 - /jisseki_settings: 項目・入力欄・文面・記録先の設定（管理者用、セレクトメニュー式）
 - パネルで項目を選ぶ → モーダル記入 → 記録先チャンネルへ embed 投稿 + ユーザーごとに集計
-- 自動置き直し: パネル設置チャンネルで最後のメッセージから1分後、
+- 自動置き直し: パネル設置チャンネルに新しいメッセージが来たら即座に、
   パネルを削除して一番下に再投稿する（会話に埋もれないように）
 - 項目ごとにモーダルの入力欄（ラベル/短文・長文/必須・任意）を設定から増やせる
 """
@@ -27,7 +27,6 @@ from sub.userdata import utility
 JST = dt.timezone(dt.timedelta(hours=9))
 MAX_FIELDS = 5  # Discord のモーダル上限
 RECORDS_KEEP = 500
-REPOST_DELAY = 60  # 最後のメッセージから置き直すまでの秒数
 
 _DEFAULT_ITEMS = [
     {"key": "i1", "label": "🏆 勝利・ドン勝", "fields": [
@@ -50,6 +49,7 @@ def jisseki_settings(cfg: dict) -> dict:
                     "達成した実績は、下のメニューから項目を選んで記入してね。\n"
                     "記入した内容は記録用チャンネルに残ります。")
     jset.setdefault("log_channel_id", None)
+    jset.setdefault("post_title", "🏆 実績記録：{item}")
     jset.setdefault("item_seq", len(_DEFAULT_ITEMS))
     if not jset.get("items"):
         jset["items"] = copy.deepcopy(_DEFAULT_ITEMS)
@@ -93,10 +93,12 @@ def _add_record(guild_id, user_id, item, values: dict):
     utility.save()
 
 
-def _record_embed(user, item, values) -> discord.Embed:
-    """記入内容そのままの固定形式（タイトル=項目名、全欄を入力順に表示）"""
-    embed = discord.Embed(title=f"🏆 実績記録：{item['label']}",
-                          color=discord.Color.gold())
+def _record_embed(user, item, values, jset=None) -> discord.Embed:
+    """記入内容そのままの形式（タイトルだけ設定で変更可、全欄を入力順に表示）"""
+    template = (jset or {}).get("post_title") or "🏆 実績記録：{item}"
+    title = template.replace("{item}", item["label"]).replace(
+        "{user}", user.display_name)
+    embed = discord.Embed(title=title[:256], color=discord.Color.gold())
     embed.add_field(name="記録者", value=user.mention, inline=False)
     for label, value in values.items():
         text = str(value).strip()
@@ -121,7 +123,8 @@ async def _post_record(interaction, item, values):
         target = interaction.channel
     if target is not None:
         try:
-            await target.send(embed=_record_embed(interaction.user, item, values))
+            await target.send(
+                embed=_record_embed(interaction.user, item, values, jset))
         except discord.HTTPException:
             pass
     await log_event(guild, f"🏆 実績記録: {item['label']} by {interaction.user.mention}")
@@ -172,14 +175,14 @@ class JissekiPanelView(discord.ui.View):
 
         sel.callback = _picked
         self.add_item(sel)
-        mine = discord.ui.Button(custom_id="jisseki:mine", label="📊 自分の実績",
-                                 style=discord.ButtonStyle.secondary, row=1)
+        total = discord.ui.Button(custom_id="jisseki:server", label="📊 鯖の総実績",
+                                  style=discord.ButtonStyle.secondary, row=1)
 
-        async def _mine(interaction: discord.Interaction):
-            await _send_own_stats(interaction)
+        async def _total(interaction: discord.Interaction):
+            await _send_server_stats(interaction)
 
-        mine.callback = _mine
-        self.add_item(mine)
+        total.callback = _total
+        self.add_item(total)
 
 
 class JissekiPickView(discord.ui.View):
@@ -237,31 +240,45 @@ class RecordModal(discord.ui.Modal):
             f"✅ 「{self.item['label']}」を記録しました！", ephemeral=True)
 
 
-async def _send_own_stats(interaction: discord.Interaction):
+async def _send_server_stats(interaction: discord.Interaction):
     guild = interaction.guild
     jset = jisseki_settings(store.cfg(guild.id))
-    stats = _stats_all().get(str(guild.id), {}).get(str(interaction.user.id), {})
-    embed = discord.Embed(title=f"📊 {interaction.user.display_name} の実績",
+    guild_stats = _stats_all().get(str(guild.id), {})
+    embed = discord.Embed(title=f"📊 {guild.name} の総実績",
                           color=discord.Color.gold())
-    if not stats:
+    if not guild_stats:
         embed.description = "まだ記録がありません。パネルから記入してね。"
-    else:
-        lines = []
-        for item in jset["items"]:
-            st = stats.get(item["key"])
+        return await interaction.response.send_message(embed=embed, ephemeral=True)
+    lines = []
+    total_records = 0
+    for item in jset["items"]:
+        count = 0
+        users = 0
+        sums: dict = {}
+        for ustats in guild_stats.values():
+            st = ustats.get(item["key"])
             if not st:
                 continue
-            line = f"{item['label']}: **{st['count']}回**"
+            count += int(st.get("count", 0))
+            users += 1
             for label, total in (st.get("sums") or {}).items():
-                line += f" / {label} 合計 {total}"
-            lines.append(line)
-        embed.description = "\n".join(lines) if lines else "まだ記録がありません。"
+                sums[label] = sums.get(label, 0) + int(total)
+        if count == 0:
+            continue
+        total_records += count
+        line = f"{item['label']}: **{count}回**（{users}人）"
+        for label, total in sums.items():
+            line += f" / {label} 合計 {total}"
+        lines.append(line)
+    if lines:
+        embed.description = f"合計 **{total_records}件** の記録\n" + "\n".join(lines)
+    else:
+        embed.description = "まだ記録がありません。パネルから記入してね。"
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ---------------- 自動置き直し ----------------
 
-_repost_tasks: dict = {}
 
 
 def _panel_loc(cfg: dict) -> dict:
@@ -288,20 +305,22 @@ async def _repost_panel(guild):
     store.save_config()
 
 
-async def _delayed_repost(guild):
-    try:
-        await asyncio.sleep(REPOST_DELAY)
-        if features_enabled(guild.id):
+_repost_locks: dict = {}
+_repost_dirty: set = set()
+
+
+async def _repost_now(guild):
+    """即時置き直し。同時に来たメッセージは1回にまとめる（ロック＋再実行フラグ）"""
+    lock = _repost_locks.setdefault(guild.id, asyncio.Lock())
+    if lock.locked():
+        _repost_dirty.add(guild.id)
+        return
+    async with lock:
+        while True:
+            _repost_dirty.discard(guild.id)
             await _repost_panel(guild)
-    except asyncio.CancelledError:
-        pass
-
-
-def _schedule_repost(guild):
-    task = _repost_tasks.get(guild.id)
-    if task and not task.done():
-        task.cancel()
-    _repost_tasks[guild.id] = asyncio.ensure_future(_delayed_repost(guild))
+            if guild.id not in _repost_dirty:
+                break
 
 
 @bot.listen("on_message")
@@ -320,7 +339,7 @@ async def jisseki_on_message(message: discord.Message):
         return
     if not features_enabled(message.guild.id):
         return
-    _schedule_repost(message.guild)
+    asyncio.ensure_future(_repost_now(message.guild))
 
 
 @bot.listen("on_ready")
@@ -353,6 +372,7 @@ def settings_embed(guild_id) -> discord.Embed:
     embed = discord.Embed(title="🏆 実績パネルの設定", color=discord.Color.gold())
     embed.add_field(name="パネルタイトル", value=jset["panel_title"], inline=False)
     embed.add_field(name="項目数", value=f"{len(jset['items'])}件", inline=True)
+    embed.add_field(name="送信タイトル", value=jset.get("post_title") or "-", inline=True)
     log_ch = jset.get("log_channel_id")
     embed.add_field(name="記録の投稿先",
                     value=f"<#{log_ch}>" if log_ch else "パネルのチャンネル", inline=True)
@@ -435,7 +455,8 @@ class JTextSettingsView(discord.ui.View):
         self.guild_id = guild_id
         for label, field, style in (
                 ("📝 パネルタイトルを編集", "panel_title", discord.TextStyle.short),
-                ("📄 パネル説明文を編集", "panel_text", discord.TextStyle.paragraph)):
+                ("📄 パネル説明文を編集", "panel_text", discord.TextStyle.paragraph),
+                ("🏆 送信タイトルを編集", "post_title", discord.TextStyle.short)):
             btn = discord.ui.Button(label=label, style=discord.ButtonStyle.primary)
 
             async def _cb(interaction: discord.Interaction, f=field, st=style, lb=label):
@@ -815,8 +836,8 @@ async def cmd_setup_jisseki(interaction: discord.Interaction):
     loc["message_id"] = msg.id
     store.save_config()
     await interaction.response.send_message(
-        "✅ 実績パネルを設置しました。このチャンネルでは最後のメッセージから"
-        "1分後に自動で置き直されます。", ephemeral=True)
+        "✅ 実績パネルを設置しました。このチャンネルでは新しいメッセージが"
+        "来るたびに自動で一番下へ置き直されます。", ephemeral=True)
 
 
 @bot.tree.command(name="jisseki_settings", description="実績パネルの設定（項目・入力欄・記録先）（管理者用）")
