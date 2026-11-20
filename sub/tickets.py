@@ -1,454 +1,349 @@
 # -*- coding: utf-8 -*-
-"""個別問い合わせチケットと、担当制の通報受付・対応管理。"""
+"""
+sub/tickets.py — チケット（個別問い合わせ）システム（サブBOT高機能）
 
-import asyncio
-import io
-import uuid
+- /setup_tickets … チケット受付パネルを設置（種類セレクト式）
+- パネルで種類を選ぶと、その人専用のチャンネルを作成
+  （見えるのは本人・担当ロール・管理者だけ）
+- /ticket_settings … 管理者専用の設定（セレクトメニュー式）:
+  パネルの文面、チケットの種類（担当ロール/カテゴリ）、同時上限、チャンネル名形式
+- チャンネル内の「🔒 閉じる」ボタンでチャンネルを削除し、ログに記録
+"""
+
+import re
+import time
 
 import discord
 from discord import app_commands
 
-from sub.core import bot, store, log_event, get_or_create_role, is_trusted, requires
-from sub.userdata import reports
+from sub.core import bot, store, log_event, get_or_create_role, requires
 
 CATEGORY_NAME = "🎫 チケット"
-_report_locks = {}
+
+_DEFAULT_TYPES = [
+    {"key": "t1", "label": "問い合わせ", "role_id": None, "category_id": None,
+     "subtypes": []},
+    {"key": "t2", "label": "相談", "role_id": None, "category_id": None,
+     "subtypes": []},
+    {"key": "t3", "label": "その他", "role_id": None, "category_id": None,
+     "subtypes": []},
+]
+
+# モーダルの中にセレクトを置ける discord.py かどうか（旧版では段階式にフォールバック）
+_MODAL_SELECT_OK = hasattr(discord.ui, "Label")
 
 
-def _report_lock(case_id: str) -> asyncio.Lock:
-    return _report_locks.setdefault(case_id, asyncio.Lock())
+def ticket_settings(cfg: dict) -> dict:
+    """チケット設定（なければデフォルトを入れる）"""
+    tset = cfg.setdefault("ticket_settings", {})
+    tset.setdefault("panel_title", "🎫 お問い合わせ・チケット")
+    tset.setdefault("panel_text",
+                    "困ったこと・相談は、下のメニューから種類を選んでね。\n"
+                    "あなた専用のチャンネルができて、運営だけが見える場所で話せます。")
+    tset.setdefault("greeting",
+                    "{user} さん、問い合わせありがとうございます。\n"
+                    "内容をここに書いてください。運営が対応します。\n"
+                    "終わったら下のボタンで閉じてください。")
+    tset.setdefault("max_open", 1)
+    tset.setdefault("place_category_ids", [])
+    tset.setdefault("name_format", "user")  # user / number / type
+    tset.setdefault("counter", 0)
+    tset.setdefault("type_seq", 3)
+    if not tset.get("types"):
+        tset["types"] = [dict(t) for t in _DEFAULT_TYPES]
+    return tset
 
 
-def _report_embed(record: dict) -> discord.Embed:
-    status = {
-        "pending": "未対応",
-        "in_progress": "対応中",
-        "completed": "完了",
-    }.get(record.get("status"), "不明")
-    embed = discord.Embed(
-        title=f"🚨 通報案件 #{record['case_id']}",
-        description=record["details"],
-        color=discord.Color.red() if status == "未対応" else discord.Color.orange(),
-    )
-    embed.add_field(name="対象", value=record["target"][:1024], inline=True)
-    embed.add_field(name="分類", value=record["category"][:1024], inline=True)
-    embed.add_field(name="状態", value=status, inline=True)
-    if record.get("evidence"):
-        embed.add_field(name="参考情報・証拠", value=record["evidence"][:1024], inline=False)
-    embed.add_field(name="通報者", value=f"<@{record['reporter_id']}>", inline=True)
-    assigned = record.get("assignee_id")
-    embed.add_field(name="担当者", value=f"<@{assigned}>" if assigned else "未割り当て", inline=True)
-    embed.add_field(name="対応メモ", value=f"{len(record.get('notes', []))}件（担当者のみ閲覧）", inline=True)
-    embed.set_footer(text=f"受付日時: {record['created_at']}")
-    return embed
+def _find_type(tset, key):
+    for t in tset["types"]:
+        if t["key"] == key:
+            return t
+    return None
 
 
-def _is_ticket_staff(interaction: discord.Interaction, cfg: dict) -> bool:
-    if is_trusted(interaction.user.id) or interaction.user.guild_permissions.administrator:
-        return True
-    staff_role = discord.utils.get(interaction.guild.roles, name=cfg.get("ticket_role", "スタッフ"))
-    return isinstance(interaction.user, discord.Member) and staff_role in interaction.user.roles
+def _slug(text: str) -> str:
+    return re.sub(r"[^\w\-]+", "", str(text))[:20] or "ticket"
 
 
-def _report_transcript(record: dict, messages: list[discord.Message]) -> bytes:
-    lines = [
-        f"通報案件 #{record['case_id']}",
-        f"状態: {record['status']}",
-        f"対象: {record['target']}",
-        f"分類: {record['category']}",
-        f"通報者: {record['reporter_name']} ({record['reporter_id']})",
-        f"担当者: {record.get('assignee_name') or '未割り当て'} ({record.get('assignee_id') or '-'})",
-        f"受付日時: {record['created_at']}",
-        f"対応開始日時: {record.get('started_at') or '-'}",
-        f"完了日時: {record.get('completed_at') or '-'}",
-        "",
-        "通報内容:",
-        record["details"],
-    ]
-    if record.get("evidence"):
-        lines.extend(["", "参考情報・証拠:", record["evidence"]])
-    lines.extend(["", "===== チャンネル内の会話 ====="])
-    for message in messages:
-        timestamp = message.created_at.isoformat(timespec="seconds")
-        author = f"{message.author} ({message.author.id})"
-        lines.append(f"[{timestamp}] {author}")
-        if message.content:
-            lines.append(message.content)
-        for embed in message.embeds:
-            if embed.title:
-                lines.append(f"[Embed] {embed.title}")
-            if embed.description:
-                lines.append(embed.description)
-        for attachment in message.attachments:
-            lines.append(f"[添付ファイル] {attachment.filename}: {attachment.url}")
-        if not message.content and not message.embeds and not message.attachments:
-            lines.append("[本文なし]")
-        lines.append("")
-    if record.get("notes"):
-        lines.extend(["===== 担当者メモ ====="])
-        for note in record["notes"]:
-            lines.append(f"[{note['at']}] {note['author']}: {note['text']}")
-    return "\n".join(lines).encode("utf-8")
+def _channel_name(tset, ttype, user) -> str:
+    fmt = tset.get("name_format", "user")
+    if fmt == "number":
+        return f"ticket-{int(tset.get('counter', 0)) + 1:03d}"
+    if fmt == "type":
+        return f"{_slug(ttype['label'])}-{user.name}"[:100]
+    if fmt == "name_type":
+        return f"{user.name}-{_slug(ttype['label'])}"[:100]
+    return f"ticket-{user.name}"[:100]
 
 
-async def _fetch_report_transcript(channel: discord.TextChannel, record: dict) -> bytes | None:
-    try:
-        messages = [message async for message in channel.history(limit=None, oldest_first=True)]
-    except (discord.Forbidden, discord.HTTPException) as exc:
-        print(f"通報ログ取得失敗 case={record['case_id']}: {exc}")
-        return None
-    return _report_transcript(record, messages)
+def _open_tickets(guild, user_id):
+    out = []
+    for ch in guild.text_channels:
+        if ch.topic and (ch.topic == f"ticket:{user_id}"
+                         or ch.topic.startswith(f"ticket:{user_id}:")):
+            out.append(ch)
+    return out
 
 
-async def _send_report_transcript(
-    guild: discord.Guild,
-    channel: discord.TextChannel,
-    record: dict,
-) -> None:
-    payload = await _fetch_report_transcript(channel, record)
-    if payload is None:
-        return
-    sent_to = set(record.setdefault("transcript_sent_to", []))
-    recipient_ids = {
-        user_id
-        for user_id in (record.get("reporter_id"), record.get("assignee_id"))
-        if user_id
-    }
-    for user_id in recipient_ids:
-        if not user_id or user_id in sent_to:
-            continue
-        user = guild.get_member(user_id) or bot.get_user(user_id)
-        if user is None:
-            try:
-                user = await bot.fetch_user(user_id)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
-                print(f"通報ログ送信先取得失敗 case={record['case_id']} user={user_id}: {exc}")
-                continue
-        try:
-            await user.send(
-                content=f"通報案件 #{record['case_id']} の対応ログです。",
-                file=discord.File(io.BytesIO(payload), filename=f"report-{record['case_id']}.txt"),
-            )
-        except (discord.Forbidden, discord.HTTPException) as exc:
-            print(f"通報ログDM失敗 case={record['case_id']} user={user_id}: {exc}")
-            continue
-        sent_to.add(user_id)
-        record["transcript_sent_to"] = list(sent_to)
-        reports.save()
-    if not recipient_ids.issubset(sent_to):
-        print(f"通報ログ未送信の宛先あり case={record['case_id']}")
+# ---------------- パネル ----------------
+
+def build_ticket_panel_embed(cfg: dict) -> discord.Embed:
+    tset = ticket_settings(cfg)
+    return discord.Embed(title=tset["panel_title"],
+                         description=tset["panel_text"],
+                         color=discord.Color.blurple())
 
 
-class ReportCaseView(discord.ui.View):
-    def __init__(self, case_id: str, completed: bool = False):
+class TicketPanelView(discord.ui.View):
+    def __init__(self, cfg: dict = None):
         super().__init__(timeout=None)
-        self.case_id = case_id
-
-        if completed:
-            resend = discord.ui.Button(
-                label="未送信ログを再送",
-                emoji="📄",
-                style=discord.ButtonStyle.secondary,
-                custom_id=f"report:{case_id}:resend",
-            )
-            resend.callback = self._resend
-            self.add_item(resend)
-            return
-
-        start = discord.ui.Button(
-            label="対応開始",
-            emoji="🛠️",
-            style=discord.ButtonStyle.primary,
-            custom_id=f"report:{case_id}:start",
-        )
-        start.callback = self._start
-        self.add_item(start)
-
-        note = discord.ui.Button(
-            label="対応メモ",
-            emoji="📝",
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"report:{case_id}:note",
-        )
-        note.callback = self._open_note
-        self.add_item(note)
-
-        complete = discord.ui.Button(
-            label="対応完了",
-            emoji="✅",
-            style=discord.ButtonStyle.success,
-            custom_id=f"report:{case_id}:complete",
-        )
-        complete.callback = self._complete
-        self.add_item(complete)
-
-        resend = discord.ui.Button(
-            label="未送信ログを再送",
-            emoji="📄",
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"report:{case_id}:resend",
-        )
-        resend.callback = self._resend
-        self.add_item(resend)
-
-    def _record(self, interaction: discord.Interaction) -> dict | None:
-        record = reports.data.get(self.case_id)
-        if record is None or record.get("guild_id") != interaction.guild_id:
-            return None
-        return record
-
-    async def _start(self, interaction: discord.Interaction):
-        record = self._record(interaction)
-        if record is None or record.get("status") != "pending":
-            await interaction.response.send_message("この案件は対応開始できません。", ephemeral=True)
-            return
-        cfg = store.cfg(interaction.guild.id)
-        if not _is_ticket_staff(interaction, cfg):
-            await interaction.response.send_message("対応開始できるのはスタッフだけです。", ephemeral=True)
-            return
-        async with _report_lock(self.case_id):
-            if record.get("status") != "pending":
-                await interaction.response.send_message("別のスタッフが先に対応を開始しました。", ephemeral=True)
-                return
-            staff_role = discord.utils.get(interaction.guild.roles, name=cfg.get("ticket_role", "スタッフ"))
-            try:
-                overwrites = dict(interaction.channel.overwrites)
-                if staff_role is not None:
-                    overwrites[staff_role] = discord.PermissionOverwrite(
-                        view_channel=False,
-                        send_messages=False,
-                    )
-                overwrites[interaction.user] = discord.PermissionOverwrite(
-                    view_channel=True,
-                    send_messages=True,
-                    read_message_history=True,
-                    attach_files=True,
-                )
-                await interaction.channel.edit(
-                    overwrites=overwrites,
-                    reason=f"通報 #{self.case_id} の担当者に割り当て",
-                )
-            except (discord.Forbidden, discord.HTTPException) as exc:
-                print(f"通報担当割り当て失敗 case={self.case_id}: {exc}")
-                await interaction.response.send_message("権限の更新に失敗したため、対応を開始できませんでした。", ephemeral=True)
-                return
-            record["status"] = "in_progress"
-            record["assignee_id"] = interaction.user.id
-            record["assignee_name"] = str(interaction.user)
-            record["started_at"] = discord.utils.utcnow().isoformat(timespec="seconds")
-            reports.save()
-        await interaction.response.edit_message(embed=_report_embed(record), view=self)
-
-    async def _open_note(self, interaction: discord.Interaction):
-        record = self._record(interaction)
-        if record is None or record.get("status") != "in_progress":
-            await interaction.response.send_message("対応中の案件ではありません。", ephemeral=True)
-            return
-        if interaction.user.id != record.get("assignee_id"):
-            await interaction.response.send_message("対応メモを追加できるのは担当者だけです。", ephemeral=True)
-            return
-        await interaction.response.send_modal(ReportNoteModal(self.case_id))
-
-    async def _complete(self, interaction: discord.Interaction):
-        record = self._record(interaction)
-        if record is None or record.get("status") != "in_progress":
-            await interaction.response.send_message("対応中の案件ではありません。", ephemeral=True)
-            return
-        if interaction.user.id != record.get("assignee_id"):
-            await interaction.response.send_message("対応完了にできるのは担当者だけです。", ephemeral=True)
-            return
-        async with _report_lock(self.case_id):
-            if record.get("status") != "in_progress":
-                await interaction.response.send_message("この案件はすでに完了しています。", ephemeral=True)
-                return
-            record["status"] = "completed"
-            record["completed_at"] = discord.utils.utcnow().isoformat(timespec="seconds")
-            reports.save()
-        await interaction.response.defer(ephemeral=True)
-        await _send_report_transcript(interaction.guild, interaction.channel, record)
-        pending = {
-            record.get("reporter_id"),
-            record.get("assignee_id"),
-        } - set(record.get("transcript_sent_to", []))
-        view = ReportCaseView(self.case_id, completed=True) if pending else None
-        if view:
-            bot.add_view(view, message_id=interaction.message.id)
-        await interaction.message.edit(embed=_report_embed(record), view=view)
-        if pending:
-            await interaction.followup.send(
-                "対応を完了しましたが、TXTログを送れなかった宛先があります。チャンネルは残し、担当者は「未送信ログを再送」から再試行できます。",
-                ephemeral=True,
-            )
+        tset = ticket_settings(cfg) if cfg is not None else None
+        if tset:
+            options = [discord.SelectOption(value=t["key"], label=t["label"][:100])
+                       for t in tset["types"]]
         else:
-            await interaction.followup.send("✅ 対応を完了し、通報者と担当者にTXTログを送信しました。", ephemeral=True)
+            options = [discord.SelectOption(value="none", label="チケットを作成")]
+        sel = discord.ui.Select(custom_id="ticket:create",
+                                placeholder="🎫 チケットの種類を選んでね",
+                                options=options, row=0)
 
-    async def _resend(self, interaction: discord.Interaction):
-        record = self._record(interaction)
-        if record is None or record.get("status") != "completed":
-            await interaction.response.send_message("未送信ログの再送が必要な案件ではありません。", ephemeral=True)
-            return
-        if interaction.user.id != record.get("assignee_id"):
-            await interaction.response.send_message("ログを再送できるのは担当者だけです。", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        await _send_report_transcript(interaction.guild, interaction.channel, record)
-        pending = {
-            record.get("reporter_id"),
-            record.get("assignee_id"),
-        } - set(record.get("transcript_sent_to", []))
-        view = ReportCaseView(self.case_id, completed=True) if pending else None
-        if view:
-            bot.add_view(view, message_id=interaction.message.id)
-        await interaction.message.edit(embed=_report_embed(record), view=view)
-        if pending:
-            await interaction.followup.send("ログの再送に失敗しました。DM設定を確認して、もう一度お試しください。", ephemeral=True)
-        else:
-            await interaction.followup.send("✅ 未送信のTXTログを送信しました。", ephemeral=True)
+        async def _picked(interaction: discord.Interaction):
+            ok = await _precheck(interaction, sel.values[0])
+            if ok is None:
+                return
+            _cfg, tset, ttype = ok
+            subtypes = ttype.get("subtypes") or []
+            places = _place_options(interaction.guild, tset)
+            if _MODAL_SELECT_OK:
+                return await interaction.response.send_modal(
+                    TicketContentModal(sel.values[0], subtypes or None,
+                                       places or None))
+            steps = {"subtype": None, "place": None}
+            if subtypes:
+                return await interaction.response.send_message(
+                    "📂 細かい種類を選んでね。",
+                    view=SubTypePickView(interaction.user.id, sel.values[0],
+                                         subtypes, places, steps),
+                    ephemeral=True)
+            if places:
+                return await interaction.response.send_message(
+                    "📍 作成場所を選んでね。",
+                    view=PlacePickView(interaction.user.id, sel.values[0],
+                                       places, steps),
+                    ephemeral=True)
+            return await interaction.response.send_modal(
+                TicketContentModal(sel.values[0]))
+
+        sel.callback = _picked
+        self.add_item(sel)
 
 
-class ReportNoteModal(discord.ui.Modal, title="対応メモを追加"):
-    note = discord.ui.TextInput(
-        label="担当者用メモ（通報者には表示されません）",
-        style=discord.TextStyle.paragraph,
-        max_length=1000,
-    )
+async def _precheck(interaction: discord.Interaction, type_key: str):
+    """作成前のチェック。通過すれば (cfg, tset, ttype)、だめなら None。"""
+    guild = interaction.guild
+    cfg = store.cfg(guild.id)
+    if not cfg.get("tickets_enabled", True):
+        await interaction.response.send_message(
+            "チケット機能は今オフだよ。", ephemeral=True)
+        return None
+    tset = ticket_settings(cfg)
+    ttype = _find_type(tset, type_key)
+    if ttype is None:
+        await interaction.response.send_message(
+            "⚠️ その種類は今は使えません。管理者に確認してね。", ephemeral=True)
+        return None
+    opened = _open_tickets(guild, interaction.user.id)
+    max_open = int(tset.get("max_open", 1))
+    if len(opened) >= max_open:
+        mentions = " ".join(ch.mention for ch in opened)
+        await interaction.response.send_message(
+            f"⚠️ 開いているチケットが上限（{max_open}件）に達しています: {mentions}",
+            ephemeral=True)
+        return None
+    return cfg, tset, ttype
 
-    def __init__(self, case_id: str):
+
+class TicketContentModal(discord.ui.Modal, title="チケットの内容"):
+    def __init__(self, type_key, subtypes=None, subtype=None,
+                 places=None, place_id=None):
         super().__init__()
-        self.case_id = case_id
+        self.type_key = type_key
+        self.subtype = subtype
+        self.place_id = place_id
+        self.sub_label = None
+        self.place_label = None
+        if subtypes:
+            sel = discord.ui.Select(
+                placeholder="細かい種類を選んでね",
+                options=[discord.SelectOption(label=str(x)[:100],
+                                              value=str(x)[:100])
+                         for x in subtypes[:25]])
+            self.sub_label = discord.ui.Label(text="細かい種類", component=sel)
+            self.add_item(self.sub_label)
+        if places:
+            psel = discord.ui.Select(
+                placeholder="作成場所（カテゴリ）を選んでね",
+                options=[discord.SelectOption(label=str(name)[:100],
+                                              value=str(cid))
+                         for cid, name in places[:25]])
+            self.place_label = discord.ui.Label(text="作成場所", component=psel)
+            self.add_item(self.place_label)
+        self.content = discord.ui.TextInput(
+            label="内容（用件を書いてね）", style=discord.TextStyle.paragraph,
+            placeholder="例: 募集のやり方が分かりません", max_length=1000)
+        self.add_item(self.content)
 
     async def on_submit(self, interaction: discord.Interaction):
-        record = reports.data.get(self.case_id)
-        if (
-            record is None
-            or record.get("guild_id") != interaction.guild_id
-            or record.get("status") != "in_progress"
-            or record.get("assignee_id") != interaction.user.id
-        ):
-            await interaction.response.send_message("この案件の担当者だけが対応メモを追加できます。", ephemeral=True)
-            return
-        record.setdefault("notes", []).append({
-            "at": discord.utils.utcnow().isoformat(timespec="seconds"),
-            "author": str(interaction.user),
-            "text": str(self.note).strip(),
-        })
-        reports.save()
-        await interaction.response.send_message("📝 担当者用メモを保存しました。通報者には表示されません。", ephemeral=True)
+        subtype = self.subtype
+        if self.sub_label is not None:
+            values = self.sub_label.component.values
+            subtype = values[0] if values else None
+        place_id = self.place_id
+        if self.place_label is not None:
+            values = self.place_label.component.values
+            place_id = int(values[0]) if values else None
+        await _create_ticket(interaction, self.type_key,
+                             content=str(self.content.value), subtype=subtype,
+                             place_id=place_id)
 
 
-class ReportModal(discord.ui.Modal, title="🚨 通報する"):
-    target = discord.ui.TextInput(label="通報対象（名前・ユーザーIDなど）", max_length=100)
-    category = discord.ui.TextInput(label="通報の分類", placeholder="例: 迷惑行為、荒らし、その他", max_length=100)
-    details = discord.ui.TextInput(label="通報内容", style=discord.TextStyle.paragraph, max_length=1500)
-    evidence = discord.ui.TextInput(
-        label="参考情報・証拠（任意）",
-        style=discord.TextStyle.paragraph,
-        required=False,
-        max_length=1000,
-    )
+class SubTypePickView(discord.ui.View):
+    """旧 discord.py 向けフォールバック: モーダルの前に細かい種類を選ぶ"""
 
-    async def on_submit(self, interaction: discord.Interaction):
-        guild = interaction.guild
-        if guild is None:
-            await interaction.response.send_message("サーバー内から通報してください。", ephemeral=True)
-            return
-        cfg = store.cfg(guild.id)
-        if not cfg.get("tickets_enabled", True):
-            await interaction.response.send_message("チケット・通報機能は現在オフです。", ephemeral=True)
-            return
-        active = next(
-            (
-                item for item in reports.data.values()
-                if item.get("guild_id") == guild.id
-                and item.get("reporter_id") == interaction.user.id
-                and item.get("status") != "completed"
-            ),
-            None,
-        )
-        if active:
-            channel = guild.get_channel(active.get("channel_id"))
-            link = channel.mention if channel else "以前の案件が対応中です"
-            await interaction.response.send_message(f"対応中の通報があります: {link}", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        category_channel = discord.utils.get(guild.categories, name=CATEGORY_NAME)
-        if category_channel is None:
-            try:
-                category_channel = await guild.create_category(CATEGORY_NAME)
-            except (discord.Forbidden, discord.HTTPException) as exc:
-                print(f"通報カテゴリ作成失敗 guild={guild.id}: {exc}")
-                await interaction.followup.send("チケットカテゴリを作成できませんでした。管理者に連絡してください。", ephemeral=True)
-                return
-        staff_role = await get_or_create_role(guild, cfg.get("ticket_role", "スタッフ"))
-        if staff_role is None:
-            await interaction.followup.send("スタッフロールを準備できませんでした。BOTのロール管理権限を確認してください。", ephemeral=True)
-            return
-        case_id = uuid.uuid4().hex[:12]
-        created_at = discord.utils.utcnow().isoformat(timespec="seconds")
-        record = {
-            "case_id": case_id,
-            "guild_id": guild.id,
-            "channel_id": None,
-            "message_id": None,
-            "reporter_id": interaction.user.id,
-            "reporter_name": str(interaction.user),
-            "target": str(self.target).strip(),
-            "category": str(self.category).strip(),
-            "details": str(self.details).strip(),
-            "evidence": str(self.evidence).strip(),
-            "status": "pending",
-            "assignee_id": None,
-            "assignee_name": None,
-            "created_at": created_at,
-            "notes": [],
-            "transcript_sent_to": [],
-        }
+    def __init__(self, owner_id, type_key, subtypes, places=None, steps=None):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.type_key = type_key
+        self.places = places or []
+        self.steps = steps if steps is not None else {"subtype": None, "place": None}
+        sel = discord.ui.Select(
+            placeholder="細かい種類を選んでね",
+            options=[discord.SelectOption(label=str(x)[:100], value=str(x)[:100])
+                     for x in subtypes[:25]])
+
+        async def _cb(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                return await interaction.response.send_message(
+                    "⚠️ これは他の人の選択です。", ephemeral=True)
+            self.steps["subtype"] = sel.values[0]
+            if self.places:
+                return await interaction.response.send_message(
+                    "📍 作成場所を選んでね。",
+                    view=PlacePickView(self.owner_id, self.type_key,
+                                       self.places, self.steps),
+                    ephemeral=True)
+            await interaction.response.send_modal(
+                TicketContentModal(self.type_key, subtype=self.steps["subtype"]))
+
+        sel.callback = _cb
+        self.add_item(sel)
+
+
+class PlacePickView(discord.ui.View):
+    """旧 discord.py 向けフォールバック: モーダルの前に作成場所を選ぶ"""
+
+    def __init__(self, owner_id, type_key, places, steps=None):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.type_key = type_key
+        self.steps = steps if steps is not None else {"subtype": None, "place": None}
+        sel = discord.ui.Select(
+            placeholder="作成場所（カテゴリ）を選んでね",
+            options=[discord.SelectOption(label=str(name)[:100], value=str(cid))
+                     for cid, name in places[:25]])
+
+        async def _cb(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                return await interaction.response.send_message(
+                    "⚠️ これは他の人の選択です。", ephemeral=True)
+            await interaction.response.send_modal(
+                TicketContentModal(self.type_key,
+                                   subtype=self.steps.get("subtype"),
+                                   place_id=int(sel.values[0])))
+
+        sel.callback = _cb
+        self.add_item(sel)
+
+
+def _place_options(guild, tset):
+    """作成場所の候補カテゴリを (id, 名前) のリストで返す（実在するものだけ）"""
+    out = []
+    for cid in tset.get("place_category_ids") or []:
+        ch = guild.get_channel(int(cid))
+        if ch is not None and getattr(ch, "type", None) == discord.ChannelType.category:
+            out.append((int(cid), ch.name))
+    return out
+
+
+async def _create_ticket(interaction: discord.Interaction, type_key: str,
+                         content: str = None, subtype: str = None,
+                         place_id: int = None):
+    guild = interaction.guild
+    checked = await _precheck(interaction, type_key)
+    if checked is None:
+        return
+    cfg, tset, ttype = checked
+    # カテゴリ（作成場所の選択 → 種類の指定 → デフォルト名で探す/作る）
+    category = None
+    if place_id:
+        found = guild.get_channel(int(place_id))
+        if found is not None and getattr(found, "type", None) == discord.ChannelType.category:
+            category = found
+    if category is None and ttype.get("category_id"):
+        found = guild.get_channel(int(ttype["category_id"]))
+        if found is not None and getattr(found, "type", None) == discord.ChannelType.category:
+            category = found
+    if category is None:
+        category = discord.utils.get(guild.categories, name=CATEGORY_NAME)
+    if category is None:
         try:
-            channel = await guild.create_text_channel(
-                name=f"report-{case_id}",
-                category=category_channel,
-                topic=f"report:{case_id}",
-                overwrites={
-                    guild.default_role: discord.PermissionOverwrite(view_channel=False),
-                    interaction.user: discord.PermissionOverwrite(
-                        view_channel=True,
-                        send_messages=True,
-                        read_message_history=True,
-                        attach_files=True,
-                    ),
-                    staff_role: discord.PermissionOverwrite(
-                        view_channel=True,
-                        send_messages=True,
-                        read_message_history=True,
-                    ),
-                    guild.me: discord.PermissionOverwrite(
-                        view_channel=True,
-                        send_messages=True,
-                        read_message_history=True,
-                        manage_channels=True,
-                    ),
-                },
-                reason=f"通報案件 #{case_id}",
-            )
-        except (discord.Forbidden, discord.HTTPException) as exc:
-            print(f"通報チャンネル作成失敗 guild={guild.id} case={case_id}: {exc}")
-            await interaction.followup.send("通報チャンネルを作成できませんでした。BOTのチャンネル管理権限を確認してください。", ephemeral=True)
-            return
-        record["channel_id"] = channel.id
-        reports.data[case_id] = record
-        reports.save()
-        message = await channel.send(
-            content=f"{staff_role.mention} 新しい通報案件です。",
-            embed=_report_embed(record),
-            view=ReportCaseView(case_id),
+            category = await guild.create_category(CATEGORY_NAME)
+        except discord.Forbidden:
+            category = None
+    # 担当ロール（種類の指定 → なければ従来の ticket_role を自動作成）
+    staff_role = None
+    if ttype.get("role_id"):
+        staff_role = guild.get_role(int(ttype["role_id"]))
+    if staff_role is None:
+        staff_role = await get_or_create_role(guild, cfg.get("ticket_role", "スタッフ"))
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        interaction.user: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, attach_files=True),
+        guild.me: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, manage_channels=True),
+    }
+    if staff_role is not None:
+        overwrites[staff_role] = discord.PermissionOverwrite(
+            view_channel=True, send_messages=True)
+    if tset.get("name_format") == "number":
+        tset["counter"] = int(tset.get("counter", 0)) + 1
+        store.save_config()
+    try:
+        ch = await guild.create_text_channel(
+            name=_channel_name(tset, ttype, interaction.user),
+            category=category,
+            topic=f"ticket:{interaction.user.id}:{ttype['key']}",
+            overwrites=overwrites,
         )
-        record["message_id"] = message.id
-        reports.save()
-        bot.add_view(ReportCaseView(case_id), message_id=message.id)
-        await interaction.followup.send(
-            f"✅ 通報を受け付けました（案件 #{case_id}）。対応状況は {channel.mention} で確認できます。",
-            ephemeral=True,
-        )
+    except discord.Forbidden:
+        return await interaction.response.send_message(
+            "❌ チャンネルを作成できませんでした（BOTの権限不足）。", ephemeral=True)
+    greeting = str(tset["greeting"]).replace("{user}", interaction.user.mention)
+    embed = discord.Embed(title=f"🎫 チケット（{ttype['label']}）",
+                          description=greeting, color=discord.Color.blurple())
+    if subtype:
+        embed.add_field(name="📂 細かい種類", value=str(subtype)[:100], inline=False)
+    if content:
+        embed.add_field(name="📝 内容", value=content[:1024], inline=False)
+    await ch.send(embed=embed, view=TicketCloseView())
+    if staff_role is not None:
+        await ch.send(f"{staff_role.mention} 新しいチケット（{ttype['label']}）です。")
+    kind_label = ttype['label'] + (f" / {subtype}" if subtype else "")
+    await log_event(guild, f"🎫 チケット作成: {ch.mention}（{kind_label}）"
+                           f" by {interaction.user.mention}")
+    await interaction.response.send_message(
+        f"🎫 チケットを作成したよ: {ch.mention}", ephemeral=True)
 
 
 class TicketCloseView(discord.ui.View):
@@ -464,7 +359,6 @@ class TicketCloseView(discord.ui.View):
                 owner_id = int(ch.topic.split(":")[1])
             except Exception:
                 owner_id = None
-        is_staff = interaction.user.guild_permissions.administrator
         await interaction.response.send_message("🔒 このチケットを閉じます。チャンネルは削除されます。")
         await log_event(interaction.guild, f"🎫 チケット終了: {ch.name}（作成者: <@{owner_id}> / 閉じた人: {interaction.user.mention}）")
         try:
@@ -473,111 +367,432 @@ class TicketCloseView(discord.ui.View):
             pass
 
 
-class TicketPanelView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="チケットを作成", emoji="🎫", style=discord.ButtonStyle.primary, custom_id="ticket_open")
-    async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild = interaction.guild
-        cfg = store.cfg(guild.id)
-        if not cfg.get("tickets_enabled", True):
-            await interaction.response.send_message("チケット機能は今オフだよ。", ephemeral=True)
-            return
-        # 既に自分のチケットがあるか
-        for ch in guild.text_channels:
-            if ch.topic == f"ticket:{interaction.user.id}":
-                await interaction.response.send_message(f"もうあなたのチケットがあるよ: {ch.mention}", ephemeral=True)
-                return
-        category = discord.utils.get(guild.categories, name=CATEGORY_NAME)
-        if category is None:
-            try:
-                category = await guild.create_category(CATEGORY_NAME)
-            except discord.Forbidden:
-                category = None
-        staff_role = await get_or_create_role(guild, cfg.get("ticket_role", "スタッフ"))
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
-        }
-        if staff_role is not None:
-            overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
-        try:
-            ch = await guild.create_text_channel(
-                name=f"ticket-{interaction.user.name}"[:100],
-                category=category,
-                topic=f"ticket:{interaction.user.id}",
-                overwrites=overwrites,
-            )
-        except discord.Forbidden:
-            await interaction.response.send_message("❌ チャンネルを作成できませんでした（BOTの権限不足）。", ephemeral=True)
-            return
-        embed = discord.Embed(
-            title="🎫 チケット",
-            description=f"{interaction.user.mention} さん、問い合わせありがとうございます。\n内容をここに書いてください。運営が対応します。\n終わったら下のボタンで閉じてください。",
-            color=discord.Color.blurple(),
-        )
-        await ch.send(embed=embed, view=TicketCloseView())
-        if staff_role is not None:
-            await ch.send(f"{staff_role.mention} 新しいチケットです。")
-        await log_event(guild, f"🎫 チケット作成: {ch.mention} by {interaction.user.mention}")
-        await interaction.response.send_message(f"🎫 チケットを作成したよ: {ch.mention}", ephemeral=True)
-
-    @discord.ui.button(label="通報する", emoji="🚨", style=discord.ButtonStyle.danger, custom_id="ticket_report")
-    async def open_report(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cfg = store.cfg(interaction.guild.id)
-        if not cfg.get("tickets_enabled", True):
-            await interaction.response.send_message("チケット・通報機能は現在オフです。", ephemeral=True)
-            return
-        await interaction.response.send_modal(ReportModal())
+async def _refresh_panel(guild):
+    cfg = store.cfg(guild.id)
+    loc = (cfg.get("panels") or {}).get("tickets")
+    if not loc:
+        return
+    ch = guild.get_channel(int(loc["channel_id"]))
+    if ch is None:
+        return
+    try:
+        msg = await ch.fetch_message(int(loc["message_id"]))
+        await msg.edit(embed=build_ticket_panel_embed(cfg),
+                       view=TicketPanelView(cfg))
+    except Exception:
+        pass
 
 
-def build_ticket_panel_embed() -> discord.Embed:
-    return discord.Embed(
-        title="🎫 お問い合わせ・チケット",
-        description="お問い合わせはチケット、通報は通報フォームから送ってね。\n通報チャンネルはスタッフと通報者だけが見られ、対応開始後は担当者と通報者だけが見られます。",
-        color=discord.Color.blurple(),
-    )
-
-
-async def refresh_ticket_panels():
-    for guild_id, cfg in store.configs.items():
-        panel = cfg.get("panels", {}).get("tickets")
-        if not panel:
-            continue
-        guild = bot.get_guild(int(guild_id))
-        channel = guild.get_channel(panel.get("channel_id")) if guild else None
-        if channel is None:
-            continue
-        try:
-            message = await channel.fetch_message(panel["message_id"])
-            await message.edit(embed=build_ticket_panel_embed(), view=TicketPanelView())
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
-            print(f"チケットパネル更新失敗 guild={guild_id}: {exc}")
-
-
-def restore_report_views():
-    for case_id, record in reports.data.items():
-        pending_transcript = {
-            record.get("reporter_id"),
-            record.get("assignee_id"),
-        } - set(record.get("transcript_sent_to", []))
-        if record.get("message_id") and (record.get("status") != "completed" or pending_transcript):
-            try:
-                bot.add_view(
-                    ReportCaseView(case_id, completed=record.get("status") == "completed"),
-                    message_id=record["message_id"],
-                )
-            except (ValueError, discord.ClientException) as exc:
-                print(f"通報案件View復旧失敗 case={case_id}: {exc}")
+@bot.listen("on_ready")
+async def tickets_on_ready():
+    for gid in list(store.configs):
+        guild = bot.get_guild(int(gid))
+        if guild is not None:
+            await _refresh_panel(guild)
 
 
 @bot.tree.command(name="setup_tickets", description="チケット受付パネルをこのチャンネルに設置する（管理者用）")
 @requires(administrator=True)
 async def cmd_setup_tickets(interaction: discord.Interaction):
-    await interaction.response.send_message(embed=build_ticket_panel_embed(), view=TicketPanelView())
-    msg = await interaction.original_response()
     cfg = store.cfg(interaction.guild.id)
-    cfg.setdefault("panels", {})["tickets"] = {"channel_id": interaction.channel.id, "message_id": msg.id}
+    await interaction.response.send_message(embed=build_ticket_panel_embed(cfg),
+                                            view=TicketPanelView(cfg))
+    msg = await interaction.original_response()
+    cfg.setdefault("panels", {})["tickets"] = {"channel_id": interaction.channel.id,
+                                               "message_id": msg.id}
     store.save_config()
+
+
+# ---------------- 管理者設定（セレクトメニュー式） ----------------
+
+class _TextModal(discord.ui.Modal):
+    def __init__(self, guild_id, field, label, style):
+        super().__init__(title=label)
+        self.guild_id = guild_id
+        self.field = field
+        cfg = store.cfg(guild_id)
+        current = ticket_settings(cfg)[field]
+        self.input = discord.ui.TextInput(label=label, style=style,
+                                          default=str(current), max_length=1000)
+        self.add_item(self.input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = store.cfg(self.guild_id)
+        ticket_settings(cfg)[self.field] = str(self.input.value)
+        store.save_config()
+        await _refresh_panel(interaction.guild)
+        await interaction.response.send_message("✅ 保存しました。", ephemeral=True)
+
+
+class TicketSettingsView(discord.ui.View):
+    def __init__(self, owner_id, guild_id):
+        super().__init__(timeout=600)
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+        sel = discord.ui.Select(
+            placeholder="設定する項目を選んでね",
+            options=[
+                discord.SelectOption(value="text", label="📝 パネルの文面",
+                                     description="タイトル・説明文・挨拶文"),
+                discord.SelectOption(value="types", label="🎫 チケットの種類",
+                                     description="種類の追加・担当ロール・カテゴリ"),
+                discord.SelectOption(value="create", label="⚙️ 作成まわりの設定",
+                                     description="同時上限・チャンネル名の形式"),
+                discord.SelectOption(value="place", label="📍 作成場所の候補",
+                                     description="ユーザーが選べるカテゴリの登録"),
+            ])
+
+        async def _picked(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                return await interaction.response.send_message(
+                    "⚠️ これは他の人の設定画面です。", ephemeral=True)
+            kind = sel.values[0]
+            if kind == "text":
+                view = TextSettingsView(self.owner_id, self.guild_id)
+            elif kind == "types":
+                view = TypeListView(self.owner_id, self.guild_id)
+            elif kind == "place":
+                view = PlaceSettingsView(self.owner_id, self.guild_id)
+            else:
+                view = CreateSettingsView(self.owner_id, self.guild_id)
+            await interaction.response.edit_message(
+                embed=settings_embed(self.guild_id), view=view)
+
+        sel.callback = _picked
+        self.add_item(sel)
+
+
+def settings_embed(guild_id) -> discord.Embed:
+    cfg = store.cfg(guild_id)
+    tset = ticket_settings(cfg)
+    types = "、".join(t["label"] for t in tset["types"]) or "なし"
+    fmt_name = {"user": "ticket-名前", "number": "ticket-連番",
+                "type": "種類-名前"}.get(tset.get("name_format"), "ticket-名前")
+    embed = discord.Embed(title="🎫 チケット設定", color=discord.Color.blurple())
+    embed.add_field(name="パネルタイトル", value=str(tset["panel_title"])[:100], inline=False)
+    embed.add_field(name="種類", value=types[:200], inline=False)
+    embed.add_field(name="同時上限", value=f"{tset['max_open']}件", inline=True)
+    embed.add_field(name="作成場所の候補",
+                    value=f"{len(tset.get('place_category_ids') or [])}件", inline=True)
+    embed.add_field(name="チャンネル名", value=fmt_name, inline=True)
+    embed.set_footer(text="設定はサーバーごとに保存されます")
+    return embed
+
+
+class TextSettingsView(discord.ui.View):
+    def __init__(self, owner_id, guild_id):
+        super().__init__(timeout=600)
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+        for label, field, style in (
+                ("タイトルを編集", "panel_title", discord.TextStyle.short),
+                ("パネルの説明文を編集", "panel_text", discord.TextStyle.paragraph),
+                ("チケットの挨拶文を編集", "greeting", discord.TextStyle.paragraph)):
+            btn = discord.ui.Button(label=label, style=discord.ButtonStyle.primary)
+
+            async def _cb(interaction: discord.Interaction, _f=field, _l=label, _s=style):
+                if interaction.user.id != self.owner_id:
+                    return await interaction.response.send_message(
+                        "⚠️ これは他の人の設定画面です。", ephemeral=True)
+                await interaction.response.send_modal(
+                    _TextModal(self.guild_id, _f, _l, _s))
+
+            btn.callback = _cb
+            self.add_item(btn)
+
+
+class TypeListView(discord.ui.View):
+    def __init__(self, owner_id, guild_id):
+        super().__init__(timeout=600)
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+        cfg = store.cfg(guild_id)
+        tset = ticket_settings(cfg)
+        options = [discord.SelectOption(value=t["key"], label=t["label"][:100],
+                                        description="タップで編集")
+                   for t in tset["types"]]
+        sel = discord.ui.Select(placeholder="編集する種類を選んでね", options=options)
+
+        async def _picked(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                return await interaction.response.send_message(
+                    "⚠️ これは他の人の設定画面です。", ephemeral=True)
+            view = TypeEditView(self.owner_id, self.guild_id, sel.values[0])
+            await interaction.response.edit_message(
+                embed=settings_embed(self.guild_id), view=view)
+
+        sel.callback = _picked
+        self.add_item(sel)
+        add = discord.ui.Button(label="➕ 種類を追加", style=discord.ButtonStyle.success, row=1)
+
+        async def _add(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                return await interaction.response.send_message(
+                    "⚠️ これは他の人の設定画面です。", ephemeral=True)
+            await interaction.response.send_modal(_TypeAddModal(self.guild_id))
+
+        add.callback = _add
+        self.add_item(add)
+
+
+class _TypeAddModal(discord.ui.Modal, title="チケットの種類を追加"):
+    name = discord.ui.TextInput(label="種類の名前（例: 問い合わせ）", max_length=50)
+
+    def __init__(self, guild_id):
+        super().__init__()
+        self.guild_id = guild_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = store.cfg(self.guild_id)
+        tset = ticket_settings(cfg)
+        seq = int(tset.get("type_seq", 3)) + 1
+        tset["type_seq"] = seq
+        tset["types"].append({"key": f"t{seq}", "label": str(self.name.value),
+                              "role_id": None, "category_id": None, "subtypes": []})
+        store.save_config()
+        await _refresh_panel(interaction.guild)
+        await interaction.response.send_message(
+            f"✅ 種類「{self.name.value}」を追加しました。", ephemeral=True)
+
+
+class _TypeRenameModal(discord.ui.Modal, title="種類の名前を変更"):
+    name = discord.ui.TextInput(label="新しい名前", max_length=50)
+
+    def __init__(self, guild_id, type_key):
+        super().__init__()
+        self.guild_id = guild_id
+        self.type_key = type_key
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = store.cfg(self.guild_id)
+        ttype = _find_type(ticket_settings(cfg), self.type_key)
+        if ttype is not None:
+            ttype["label"] = str(self.name.value)
+            store.save_config()
+            await _refresh_panel(interaction.guild)
+        await interaction.response.send_message("✅ 名前を変更しました。", ephemeral=True)
+
+
+class _SubTypesModal(discord.ui.Modal, title="細かい種類を編集"):
+    def __init__(self, guild_id, type_key):
+        super().__init__()
+        self.guild_id = guild_id
+        self.type_key = type_key
+        ttype = _find_type(ticket_settings(store.cfg(guild_id)), type_key) or {}
+        current = "\n".join(ttype.get("subtypes") or [])
+        self.input = discord.ui.TextInput(
+            label="細かい種類（1行に1つ・空なら細分化なし）",
+            style=discord.TextStyle.paragraph, default=current,
+            required=False, max_length=1000)
+        self.add_item(self.input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        lines = [ln.strip() for ln in str(self.input.value).splitlines()
+                 if ln.strip()][:25]
+        ttype = _find_type(ticket_settings(store.cfg(self.guild_id)), self.type_key)
+        if ttype is not None:
+            ttype["subtypes"] = lines
+            store.save_config()
+            await _refresh_panel(interaction.guild)
+        await interaction.response.send_message(
+            f"✅ 細かい種類を {len(lines)} 件に設定しました。", ephemeral=True)
+
+
+class TypeEditView(discord.ui.View):
+    def __init__(self, owner_id, guild_id, type_key):
+        super().__init__(timeout=600)
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+        self.type_key = type_key
+        cfg = store.cfg(guild_id)
+        ttype = _find_type(ticket_settings(cfg), type_key) or {}
+        role_sel = discord.ui.RoleSelect(placeholder="担当ロールを選ぶ", row=0)
+
+        async def _role(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                return await interaction.response.send_message(
+                    "⚠️ これは他の人の設定画面です。", ephemeral=True)
+            t = _find_type(ticket_settings(store.cfg(self.guild_id)), self.type_key)
+            if t is not None and role_sel.values:
+                t["role_id"] = role_sel.values[0].id
+                store.save_config()
+            await interaction.response.edit_message(
+                embed=settings_embed(self.guild_id), view=self)
+
+        role_sel.callback = _role
+        self.add_item(role_sel)
+        cat_sel = discord.ui.ChannelSelect(
+            placeholder="作成先カテゴリを選ぶ",
+            channel_types=[discord.ChannelType.category], row=1)
+
+        async def _cat(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                return await interaction.response.send_message(
+                    "⚠️ これは他の人の設定画面です。", ephemeral=True)
+            t = _find_type(ticket_settings(store.cfg(self.guild_id)), self.type_key)
+            if t is not None and cat_sel.values:
+                t["category_id"] = cat_sel.values[0].id
+                store.save_config()
+            await interaction.response.edit_message(
+                embed=settings_embed(self.guild_id), view=self)
+
+        cat_sel.callback = _cat
+        self.add_item(cat_sel)
+        rename = discord.ui.Button(label="✏️ 名前を変更", style=discord.ButtonStyle.primary, row=2)
+
+        async def _rename(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                return await interaction.response.send_message(
+                    "⚠️ これは他の人の設定画面です。", ephemeral=True)
+            await interaction.response.send_modal(
+                _TypeRenameModal(self.guild_id, self.type_key))
+
+        rename.callback = _rename
+        self.add_item(rename)
+        clear = discord.ui.Button(label="担当ロール/カテゴリを未指定に戻す",
+                                  style=discord.ButtonStyle.secondary, row=2)
+
+        async def _clear(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                return await interaction.response.send_message(
+                    "⚠️ これは他の人の設定画面です。", ephemeral=True)
+            t = _find_type(ticket_settings(store.cfg(self.guild_id)), self.type_key)
+            if t is not None:
+                t["role_id"] = None
+                t["category_id"] = None
+                store.save_config()
+            await interaction.response.edit_message(
+                embed=settings_embed(self.guild_id), view=self)
+
+        clear.callback = _clear
+        self.add_item(clear)
+        subs = discord.ui.Button(label="📂 細かい種類を編集",
+                                 style=discord.ButtonStyle.primary, row=3)
+
+        async def _subs(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                return await interaction.response.send_message(
+                    "⚠️ これは他の人の設定画面です。", ephemeral=True)
+            await interaction.response.send_modal(
+                _SubTypesModal(self.guild_id, self.type_key))
+
+        subs.callback = _subs
+        self.add_item(subs)
+        delete = discord.ui.Button(label="🗑 この種類を削除", style=discord.ButtonStyle.danger, row=3)
+
+        async def _delete(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                return await interaction.response.send_message(
+                    "⚠️ これは他の人の設定画面です。", ephemeral=True)
+            tset = ticket_settings(store.cfg(self.guild_id))
+            if len(tset["types"]) <= 1:
+                return await interaction.response.send_message(
+                    "⚠️ 種類は最低1つ必要です。", ephemeral=True)
+            tset["types"] = [t for t in tset["types"] if t["key"] != self.type_key]
+            store.save_config()
+            await _refresh_panel(interaction.guild)
+            await interaction.response.edit_message(
+                embed=settings_embed(self.guild_id),
+                view=TypeListView(self.owner_id, self.guild_id))
+
+        delete.callback = _delete
+        self.add_item(delete)
+        note = f"編集中: {ttype.get('label', '?')}"
+        self._note = note
+
+
+class CreateSettingsView(discord.ui.View):
+    def __init__(self, owner_id, guild_id):
+        super().__init__(timeout=600)
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+        max_sel = discord.ui.Select(
+            placeholder="1人あたりの同時チケット上限",
+            options=[discord.SelectOption(value=str(n), label=f"{n}件まで")
+                     for n in (1, 2, 3, 4, 5)], row=0)
+
+        async def _max(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                return await interaction.response.send_message(
+                    "⚠️ これは他の人の設定画面です。", ephemeral=True)
+            ticket_settings(store.cfg(self.guild_id))["max_open"] = int(max_sel.values[0])
+            store.save_config()
+            await interaction.response.edit_message(
+                embed=settings_embed(self.guild_id), view=self)
+
+        max_sel.callback = _max
+        self.add_item(max_sel)
+        fmt_sel = discord.ui.Select(
+            placeholder="チャンネル名の形式",
+            options=[
+                discord.SelectOption(value="user", label="ticket-名前",
+                                     description="例: ticket-taro"),
+                discord.SelectOption(value="number", label="ticket-連番",
+                                     description="例: ticket-001"),
+                discord.SelectOption(value="type", label="種類-名前",
+                                     description="例: 問い合わせ-taro"),
+                discord.SelectOption(value="name_type", label="名前-種類",
+                                     description="例: taro-問い合わせ"),
+            ], row=1)
+
+        async def _fmt(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                return await interaction.response.send_message(
+                    "⚠️ これは他の人の設定画面です。", ephemeral=True)
+            ticket_settings(store.cfg(self.guild_id))["name_format"] = fmt_sel.values[0]
+            store.save_config()
+            await interaction.response.edit_message(
+                embed=settings_embed(self.guild_id), view=self)
+
+        fmt_sel.callback = _fmt
+        self.add_item(fmt_sel)
+
+
+
+class PlaceSettingsView(discord.ui.View):
+    """作成場所の候補カテゴリを登録する画面（管理者設定の独立項目）"""
+
+    def __init__(self, owner_id, guild_id):
+        super().__init__(timeout=600)
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+        place_sel = discord.ui.ChannelSelect(
+            placeholder="作成場所の候補カテゴリ（複数可・ユーザーが選べます）",
+            channel_types=[discord.ChannelType.category],
+            min_values=1, max_values=10, row=0)
+
+        async def _place(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                return await interaction.response.send_message(
+                    "⚠️ これは他の人の設定画面です。", ephemeral=True)
+            ticket_settings(store.cfg(self.guild_id))["place_category_ids"] = [
+                ch.id for ch in place_sel.values]
+            store.save_config()
+            await interaction.response.edit_message(
+                embed=settings_embed(self.guild_id), view=self)
+
+        place_sel.callback = _place
+        self.add_item(place_sel)
+        clear = discord.ui.Button(label="候補をすべてクリア",
+                                  style=discord.ButtonStyle.secondary, row=1)
+
+        async def _clear(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                return await interaction.response.send_message(
+                    "⚠️ これは他の人の設定画面です。", ephemeral=True)
+            ticket_settings(store.cfg(self.guild_id))["place_category_ids"] = []
+            store.save_config()
+            await interaction.response.edit_message(
+                embed=settings_embed(self.guild_id), view=self)
+
+        clear.callback = _clear
+        self.add_item(clear)
+
+
+@bot.tree.command(name="ticket_settings", description="チケットの設定（文面・種類・作成まわり）（管理者用）")
+@requires(administrator=True)
+async def cmd_ticket_settings(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        embed=settings_embed(interaction.guild.id),
+        view=TicketSettingsView(interaction.user.id, interaction.guild.id),
+        ephemeral=True)
