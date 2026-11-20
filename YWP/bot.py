@@ -97,7 +97,7 @@ REQUEST_DELAY = 0.5                     # リクエスト前待機（秒・±30%
 
 WALLET_REFRESH_EVERY = 30       # 所持数を取り直す間隔（周）。1回につき再ログインが走る
 WALLET_REFRESH_NEAR = 3         # 目標まで残りこの周数を切ったら毎周確認する
-MAX_CONCURRENT_JOBS = 500        # 全体で同時に走らせるジョブ数の上限（待ちの分は別）
+MAX_CONCURRENT_JOBS = 1000        # 全体で同時に走らせるジョブ数の上限（待ちの分は別）
 MAX_JOBS_PER_USER = 250           # 1ユーザーで同時に投げられるジョブ数（複垢代行用）
 PROGRESS_INTERVAL = 30.0        # DM進捗メッセージの最短更新間隔（秒）
 REFRESH_WAIT = 45.0             # 「🔄 更新」が所持数の取り直しを待つ上限（秒）
@@ -310,7 +310,7 @@ SETTING_DEFS: dict[str, dict] = {
         'help': '小さくすると所持数が正確になりますが、1回につき再ログインが走ります',
     },
     'MAX_JOBS_PER_USER': {
-        'label': '1人あたりの同時ジョブ数', 'type': int, 'min': 1, 'max': 20,
+        'label': '1人あたりの同時ジョブ数', 'type': int, 'min': 1, 'max': 500,
         'help': '複垢代行用。全体の同時稼働数はコード側の固定値です',
     },
     'ERROR_RETRY': {
