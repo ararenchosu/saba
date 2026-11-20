@@ -45,12 +45,17 @@ def ticket_settings(cfg: dict) -> dict:
                     "内容をここに書いてください。運営が対応します。\n"
                     "終わったら下のボタンで閉じてください。")
     tset.setdefault("max_open", 1)
-    tset.setdefault("place_category_ids", [])
     tset.setdefault("name_format", "user")  # user / number / type
     tset.setdefault("counter", 0)
     tset.setdefault("type_seq", 3)
     if not tset.get("types"):
         tset["types"] = [dict(t) for t in _DEFAULT_TYPES]
+    for t in tset["types"]:
+        t.setdefault("role_id", None)
+        t.setdefault("category_id", None)
+        t.setdefault("subtypes", [])
+        if not isinstance(t.get("subtype_categories"), dict):
+            t["subtype_categories"] = {}
     return tset
 
 
@@ -68,7 +73,7 @@ def _slug(text: str) -> str:
 def _channel_name(tset, ttype, user) -> str:
     fmt = tset.get("name_format", "user")
     if fmt == "number":
-        return f"ticket-{int(tset.get('counter', 0)) + 1:03d}"
+        return f"ticket-{int(tset.get('counter', 0)):03d}"
     if fmt == "type":
         return f"{_slug(ttype['label'])}-{user.name}"[:100]
     if fmt == "name_type":
@@ -113,26 +118,15 @@ class TicketPanelView(discord.ui.View):
                 return
             _cfg, tset, ttype = ok
             subtypes = ttype.get("subtypes") or []
-            places = _place_options(interaction.guild, tset)
-            if _MODAL_SELECT_OK:
-                return await interaction.response.send_modal(
-                    TicketContentModal(sel.values[0], subtypes or None,
-                                       places or None))
-            steps = {"subtype": None, "place": None}
-            if subtypes:
+            if subtypes and not _MODAL_SELECT_OK:
                 return await interaction.response.send_message(
                     "📂 細かい種類を選んでね。",
                     view=SubTypePickView(interaction.user.id, sel.values[0],
-                                         subtypes, places, steps),
-                    ephemeral=True)
-            if places:
-                return await interaction.response.send_message(
-                    "📍 作成場所を選んでね。",
-                    view=PlacePickView(interaction.user.id, sel.values[0],
-                                       places, steps),
+                                         subtypes),
                     ephemeral=True)
             return await interaction.response.send_modal(
-                TicketContentModal(sel.values[0]))
+                TicketContentModal(sel.values[0],
+                                   subtypes if _MODAL_SELECT_OK else None))
 
         sel.callback = _picked
         self.add_item(sel)
@@ -164,14 +158,11 @@ async def _precheck(interaction: discord.Interaction, type_key: str):
 
 
 class TicketContentModal(discord.ui.Modal, title="チケットの内容"):
-    def __init__(self, type_key, subtypes=None, subtype=None,
-                 places=None, place_id=None):
+    def __init__(self, type_key, subtypes=None, subtype=None):
         super().__init__()
         self.type_key = type_key
         self.subtype = subtype
-        self.place_id = place_id
         self.sub_label = None
-        self.place_label = None
         if subtypes:
             sel = discord.ui.Select(
                 placeholder="細かい種類を選んでね",
@@ -180,14 +171,6 @@ class TicketContentModal(discord.ui.Modal, title="チケットの内容"):
                          for x in subtypes[:25]])
             self.sub_label = discord.ui.Label(text="細かい種類", component=sel)
             self.add_item(self.sub_label)
-        if places:
-            psel = discord.ui.Select(
-                placeholder="作成場所（カテゴリ）を選んでね",
-                options=[discord.SelectOption(label=str(name)[:100],
-                                              value=str(cid))
-                         for cid, name in places[:25]])
-            self.place_label = discord.ui.Label(text="作成場所", component=psel)
-            self.add_item(self.place_label)
         self.content = discord.ui.TextInput(
             label="内容（用件を書いてね）", style=discord.TextStyle.paragraph,
             placeholder="例: 募集のやり方が分かりません", max_length=1000)
@@ -198,24 +181,17 @@ class TicketContentModal(discord.ui.Modal, title="チケットの内容"):
         if self.sub_label is not None:
             values = self.sub_label.component.values
             subtype = values[0] if values else None
-        place_id = self.place_id
-        if self.place_label is not None:
-            values = self.place_label.component.values
-            place_id = int(values[0]) if values else None
         await _create_ticket(interaction, self.type_key,
-                             content=str(self.content.value), subtype=subtype,
-                             place_id=place_id)
+                             content=str(self.content.value), subtype=subtype)
 
 
 class SubTypePickView(discord.ui.View):
     """旧 discord.py 向けフォールバック: モーダルの前に細かい種類を選ぶ"""
 
-    def __init__(self, owner_id, type_key, subtypes, places=None, steps=None):
+    def __init__(self, owner_id, type_key, subtypes):
         super().__init__(timeout=300)
         self.owner_id = owner_id
         self.type_key = type_key
-        self.places = places or []
-        self.steps = steps if steps is not None else {"subtype": None, "place": None}
         sel = discord.ui.Select(
             placeholder="細かい種類を選んでね",
             options=[discord.SelectOption(label=str(x)[:100], value=str(x)[:100])
@@ -225,68 +201,25 @@ class SubTypePickView(discord.ui.View):
             if interaction.user.id != self.owner_id:
                 return await interaction.response.send_message(
                     "⚠️ これは他の人の選択です。", ephemeral=True)
-            self.steps["subtype"] = sel.values[0]
-            if self.places:
-                return await interaction.response.send_message(
-                    "📍 作成場所を選んでね。",
-                    view=PlacePickView(self.owner_id, self.type_key,
-                                       self.places, self.steps),
-                    ephemeral=True)
             await interaction.response.send_modal(
-                TicketContentModal(self.type_key, subtype=self.steps["subtype"]))
+                TicketContentModal(self.type_key, subtype=sel.values[0]))
 
         sel.callback = _cb
         self.add_item(sel)
-
-
-class PlacePickView(discord.ui.View):
-    """旧 discord.py 向けフォールバック: モーダルの前に作成場所を選ぶ"""
-
-    def __init__(self, owner_id, type_key, places, steps=None):
-        super().__init__(timeout=300)
-        self.owner_id = owner_id
-        self.type_key = type_key
-        self.steps = steps if steps is not None else {"subtype": None, "place": None}
-        sel = discord.ui.Select(
-            placeholder="作成場所（カテゴリ）を選んでね",
-            options=[discord.SelectOption(label=str(name)[:100], value=str(cid))
-                     for cid, name in places[:25]])
-
-        async def _cb(interaction: discord.Interaction):
-            if interaction.user.id != self.owner_id:
-                return await interaction.response.send_message(
-                    "⚠️ これは他の人の選択です。", ephemeral=True)
-            await interaction.response.send_modal(
-                TicketContentModal(self.type_key,
-                                   subtype=self.steps.get("subtype"),
-                                   place_id=int(sel.values[0])))
-
-        sel.callback = _cb
-        self.add_item(sel)
-
-
-def _place_options(guild, tset):
-    """作成場所の候補カテゴリを (id, 名前) のリストで返す（実在するものだけ）"""
-    out = []
-    for cid in tset.get("place_category_ids") or []:
-        ch = guild.get_channel(int(cid))
-        if ch is not None and getattr(ch, "type", None) == discord.ChannelType.category:
-            out.append((int(cid), ch.name))
-    return out
 
 
 async def _create_ticket(interaction: discord.Interaction, type_key: str,
-                         content: str = None, subtype: str = None,
-                         place_id: int = None):
+                         content: str = None, subtype: str = None):
     guild = interaction.guild
     checked = await _precheck(interaction, type_key)
     if checked is None:
         return
     cfg, tset, ttype = checked
-    # カテゴリ（作成場所の選択 → 種類の指定 → デフォルト名で探す/作る）
+    # カテゴリ（細かい種類の指定 → 種類の指定 → デフォルト名で探す/作る）
     category = None
-    if place_id:
-        found = guild.get_channel(int(place_id))
+    sub_cat_id = (ttype.get("subtype_categories") or {}).get(subtype) if subtype else None
+    if sub_cat_id:
+        found = guild.get_channel(int(sub_cat_id))
         if found is not None and getattr(found, "type", None) == discord.ChannelType.category:
             category = found
     if category is None and ttype.get("category_id"):
@@ -438,8 +371,6 @@ class TicketSettingsView(discord.ui.View):
                                      description="種類の追加・担当ロール・カテゴリ"),
                 discord.SelectOption(value="create", label="⚙️ 作成まわりの設定",
                                      description="同時上限・チャンネル名の形式"),
-                discord.SelectOption(value="place", label="📍 作成場所の候補",
-                                     description="ユーザーが選べるカテゴリの登録"),
             ])
 
         async def _picked(interaction: discord.Interaction):
@@ -451,8 +382,6 @@ class TicketSettingsView(discord.ui.View):
                 view = TextSettingsView(self.owner_id, self.guild_id)
             elif kind == "types":
                 view = TypeListView(self.owner_id, self.guild_id)
-            elif kind == "place":
-                view = PlaceSettingsView(self.owner_id, self.guild_id)
             else:
                 view = CreateSettingsView(self.owner_id, self.guild_id)
             await interaction.response.edit_message(
@@ -467,13 +396,11 @@ def settings_embed(guild_id) -> discord.Embed:
     tset = ticket_settings(cfg)
     types = "、".join(t["label"] for t in tset["types"]) or "なし"
     fmt_name = {"user": "ticket-名前", "number": "ticket-連番",
-                "type": "種類-名前"}.get(tset.get("name_format"), "ticket-名前")
+                "type": "種類-名前", "name_type": "名前-種類"}.get(tset.get("name_format"), "ticket-名前")
     embed = discord.Embed(title="🎫 チケット設定", color=discord.Color.blurple())
     embed.add_field(name="パネルタイトル", value=str(tset["panel_title"])[:100], inline=False)
     embed.add_field(name="種類", value=types[:200], inline=False)
     embed.add_field(name="同時上限", value=f"{tset['max_open']}件", inline=True)
-    embed.add_field(name="作成場所の候補",
-                    value=f"{len(tset.get('place_category_ids') or [])}件", inline=True)
     embed.add_field(name="チャンネル名", value=fmt_name, inline=True)
     embed.set_footer(text="設定はサーバーごとに保存されます")
     return embed
@@ -592,6 +519,9 @@ class _SubTypesModal(discord.ui.Modal, title="細かい種類を編集"):
         ttype = _find_type(ticket_settings(store.cfg(self.guild_id)), self.type_key)
         if ttype is not None:
             ttype["subtypes"] = lines
+            mapping = ttype.get("subtype_categories") or {}
+            ttype["subtype_categories"] = {
+                k: v for k, v in mapping.items() if k in lines}
             store.save_config()
             await _refresh_panel(interaction.guild)
         await interaction.response.send_message(
@@ -697,8 +627,113 @@ class TypeEditView(discord.ui.View):
 
         delete.callback = _delete
         self.add_item(delete)
+        subplace = discord.ui.Button(label="📍 細かい種類の作成場所",
+                                     style=discord.ButtonStyle.primary, row=4)
+
+        async def _subplace(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                return await interaction.response.send_message(
+                    "⚠️ これは他の人の設定画面です。", ephemeral=True)
+            t = _find_type(ticket_settings(store.cfg(self.guild_id)),
+                           self.type_key) or {}
+            if not (t.get("subtypes") or []):
+                return await interaction.response.send_message(
+                    "⚠️ 先に「📂 細かい種類を編集」で細かい種類を登録してね。",
+                    ephemeral=True)
+            await interaction.response.send_message(
+                "📍 作成場所を設定する細かい種類を選んでね。",
+                view=SubtypePlaceView(self.owner_id, self.guild_id, self.type_key),
+                ephemeral=True)
+
+        subplace.callback = _subplace
+        self.add_item(subplace)
         note = f"編集中: {ttype.get('label', '?')}"
         self._note = note
+
+
+class SubtypePlaceView(discord.ui.View):
+    """細かい種類を選んで、その作成場所を設定する画面へ進む"""
+
+    def __init__(self, owner_id, guild_id, type_key):
+        super().__init__(timeout=600)
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+        self.type_key = type_key
+        ttype = _find_type(ticket_settings(store.cfg(guild_id)), type_key) or {}
+        mapping = ttype.get("subtype_categories") or {}
+        options = []
+        for name in (ttype.get("subtypes") or [])[:25]:
+            cid = mapping.get(name)
+            options.append(discord.SelectOption(
+                label=str(name)[:100], value=str(name)[:100],
+                description=f"作成場所ID: {cid}" if cid else "作成場所: 未設定"))
+        sel = discord.ui.Select(placeholder="細かい種類を選んでね", options=options)
+
+        async def _cb(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                return await interaction.response.send_message(
+                    "⚠️ これは他の人の設定画面です。", ephemeral=True)
+            await interaction.response.send_message(
+                f"📍 「{sel.values[0]}」の作成場所（カテゴリ）を選んでね。",
+                view=SubtypePlacePickView(self.owner_id, self.guild_id,
+                                          self.type_key, sel.values[0]),
+                ephemeral=True)
+
+        sel.callback = _cb
+        self.add_item(sel)
+
+
+class SubtypePlacePickView(discord.ui.View):
+    """選んだ細かい種類に作成先カテゴリを割り当てる画面"""
+
+    def __init__(self, owner_id, guild_id, type_key, subtype):
+        super().__init__(timeout=600)
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+        self.type_key = type_key
+        self.subtype = subtype
+        cat_sel = discord.ui.ChannelSelect(
+            placeholder="作成先カテゴリを選んでね",
+            channel_types=[discord.ChannelType.category], min_values=1, max_values=1)
+
+        async def _pick(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                return await interaction.response.send_message(
+                    "⚠️ これは他の人の設定画面です。", ephemeral=True)
+            ttype = _find_type(ticket_settings(store.cfg(self.guild_id)),
+                               self.type_key)
+            if ttype is not None:
+                mapping = ttype.get("subtype_categories") or {}
+                mapping[self.subtype] = cat_sel.values[0].id
+                ttype["subtype_categories"] = mapping
+                store.save_config()
+            await interaction.response.edit_message(
+                content=f"✅ 「{self.subtype}」の作成場所を"
+                        f"「{cat_sel.values[0].name}」に設定しました。",
+                view=None)
+
+        cat_sel.callback = _pick
+        self.add_item(cat_sel)
+        clear = discord.ui.Button(label="この細かい種類の場所をクリア",
+                                  style=discord.ButtonStyle.secondary)
+
+        async def _clear(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                return await interaction.response.send_message(
+                    "⚠️ これは他の人の設定画面です。", ephemeral=True)
+            ttype = _find_type(ticket_settings(store.cfg(self.guild_id)),
+                               self.type_key)
+            if ttype is not None:
+                mapping = ttype.get("subtype_categories") or {}
+                mapping.pop(self.subtype, None)
+                ttype["subtype_categories"] = mapping
+                store.save_config()
+            await interaction.response.edit_message(
+                content=f"✅ 「{self.subtype}」の作成場所をクリアしました。",
+                view=None)
+
+        clear.callback = _clear
+        self.add_item(clear)
 
 
 class CreateSettingsView(discord.ui.View):
@@ -747,46 +782,6 @@ class CreateSettingsView(discord.ui.View):
         fmt_sel.callback = _fmt
         self.add_item(fmt_sel)
 
-
-
-class PlaceSettingsView(discord.ui.View):
-    """作成場所の候補カテゴリを登録する画面（管理者設定の独立項目）"""
-
-    def __init__(self, owner_id, guild_id):
-        super().__init__(timeout=600)
-        self.owner_id = owner_id
-        self.guild_id = guild_id
-        place_sel = discord.ui.ChannelSelect(
-            placeholder="作成場所の候補カテゴリ（複数可・ユーザーが選べます）",
-            channel_types=[discord.ChannelType.category],
-            min_values=1, max_values=10, row=0)
-
-        async def _place(interaction: discord.Interaction):
-            if interaction.user.id != self.owner_id:
-                return await interaction.response.send_message(
-                    "⚠️ これは他の人の設定画面です。", ephemeral=True)
-            ticket_settings(store.cfg(self.guild_id))["place_category_ids"] = [
-                ch.id for ch in place_sel.values]
-            store.save_config()
-            await interaction.response.edit_message(
-                embed=settings_embed(self.guild_id), view=self)
-
-        place_sel.callback = _place
-        self.add_item(place_sel)
-        clear = discord.ui.Button(label="候補をすべてクリア",
-                                  style=discord.ButtonStyle.secondary, row=1)
-
-        async def _clear(interaction: discord.Interaction):
-            if interaction.user.id != self.owner_id:
-                return await interaction.response.send_message(
-                    "⚠️ これは他の人の設定画面です。", ephemeral=True)
-            ticket_settings(store.cfg(self.guild_id))["place_category_ids"] = []
-            store.save_config()
-            await interaction.response.edit_message(
-                embed=settings_embed(self.guild_id), view=self)
-
-        clear.callback = _clear
-        self.add_item(clear)
 
 
 @bot.tree.command(name="ticket_settings", description="チケットの設定（文面・種類・作成まわり）（管理者用）")
