@@ -3797,7 +3797,8 @@ def item_label(item_id) -> str:
 
 def key_status_text(job: FarmJob) -> str:
     inventory = job.item_prev or job.current_items or {}
-    stage_id = job.stage_id
+    stage_id = (job.stage_ids[job.stage_pos % len(job.stage_ids)]
+                if job.is_preset and job.stage_ids else job.stage_id)
     stage_no = stage_id % 1000 if stage_id >= 1_000_000 else None
     if stage_no not in range(1, 10):
         return '現在の面の鍵情報を判定できません'
