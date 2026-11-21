@@ -1571,19 +1571,28 @@ class AccountRecord:
 
 class StoneAccountJob:
     def __init__(self, job_id: int, user: discord.abc.User, count: int,
-                 target_ypoint: int, password: str | None, player_name: str | None):
+                 target_ypoint: int, password: str | None, player_name: str | None,
+                 battle_time: float = DEFAULT_BATTLE_TIME,
+                 cooldown: float = DEFAULT_COOLDOWN):
         self.job_id = job_id
         self.user = user
         self.count = count
         self.target_ypoint = target_ypoint
         self.password = password
         self.player_name = player_name
+        self.battle_time = battle_time
+        self.cooldown = cooldown
         self.started_at = datetime.now()
         self.completed = 0
         self.failed = 0
         self.current_account = 0
         self.status = '待機中'
         self.detail = 'キュー待ち'
+        self.estimate_start = None
+        self.estimate_initial_points = None
+        self.estimate_points = None
+        self.estimated_finish = None
+        self.success_durations: list[float] = []
         self.task: asyncio.Task | None = None
 
 
@@ -1591,6 +1600,8 @@ STONE_JOBS: dict[int, list[StoneAccountJob]] = {}
 STONE_RUNNING_TARGETS: set[tuple[int, int]] = set()
 STONE_JOB_COUNTER = 0
 STONE_JOBS_PER_PAGE = 10
+STONE_PROGRESS_PANELS_FILE = os.path.join(BASE_DIR, 'data', 'stone_progress_panels.json')
+STONE_PROGRESS_PANELS: dict[int, 'StoneProgressPanel'] = {}
 
 
 def find_auth_token(html: str) -> str | None:
@@ -1813,14 +1824,18 @@ async def unlock_menus(c: Client, progress=None) -> dict:
 
 
 async def clear_stage(c: Client, stage_id: int, progress=None,
-                      attempts: int = AGED_CLEAR_RETRY, inspect: bool = True) -> int:
+                      attempts: int = AGED_CLEAR_RETRY, inspect: bool = True,
+                      battle_time: float = BATTLE_TIME_MIN,
+                      shortage_handler=None) -> int:
     """stage_id を1回クリアする（久垢作成用）。できなければ RuntimeError
 
     バトル時間の下限は通常の周回と同じものを守る（BATTLE_TIME_MIN 参照）。
     inspect: クリア後にセーブを取り直して進行フラグの変化をログに残す（1面ごとに1往復増える）
     """
     last = ''
-    for n in range(1, attempts + 1):
+    n = 0
+    while n < attempts:
+        n += 1
         if progress and n > 1:
             await progress(f'⚔ ステージ `{stage_id}` に再挑戦中...（{n}/{attempts}）')
 
@@ -1832,10 +1847,20 @@ async def clear_stage(c: Client, stage_id: int, progress=None,
             continue
 
         code = js.get('resultCode') if isinstance(js, dict) else None
+        if shortage_handler and isinstance(js, dict) and js.get('ywp_user_data') is not None:
+            c.save['ywp_user_data'] = js['ywp_user_data']
         if code != 0:
+            if shortage_handler and (code == 5 or is_hitodama_shortage(js)):
+                if await shortage_handler(stage_id, js):
+                    n -= 1
+                    continue
             if is_hitodama_shortage(js):
-                raise RuntimeError('ひとだま不足でステージを開始できませんでした')
-            last = f'gameStart rc={code} ({RC.get(code, "不明")})'
+                raise RuntimeError(f'ステージ {stage_id}: ひとだま不足で開始できませんでした')
+            detail = (js.get('dialogMsg') or js.get('dialogTitle') or '') \
+                if isinstance(js, dict) else ''
+            last = f'ステージ {stage_id}: gameStart rc={code} ({RC.get(code, "不明")})'
+            if detail:
+                last += f' サーバー通知: {str(detail)[:120]}'
             if code in FATAL_CODES:
                 raise RuntimeError(last)
             await asyncio.sleep(AGED_RETRY_WAIT)
@@ -1844,7 +1869,7 @@ async def clear_stage(c: Client, stage_id: int, progress=None,
         # バトル時間。サーバーが計る gameStart→gameEnd の間隔で下限を判定する。
         # 最短のクリア秒は c.min_clear_time（今は一律 BATTLE_TIME_MIN）
         need = c.min_clear_time(stage_id, js)
-        wait = jitter(BATTLE_TIME_MIN, BATTLE_TIME_MIN, spread=BATTLE_TIME_SPREAD)
+        wait = jitter(battle_time, BATTLE_TIME_MIN, spread=BATTLE_TIME_SPREAD)
         if need > wait:
             wait = need * random.uniform(1.0, 1.12)
         t0 = time.time()
@@ -1861,6 +1886,8 @@ async def clear_stage(c: Client, stage_id: int, progress=None,
             continue
 
         code = result.get('resultCode') if isinstance(result, dict) else None
+        if shortage_handler and isinstance(result, dict) and result.get('ywp_user_data') is not None:
+            c.save['ywp_user_data'] = result['ywp_user_data']
         if code == 0 and not inspect:
             return reward_youkai_id(result)
         if code == 0:
@@ -1966,7 +1993,88 @@ async def prepare_stone_stage_deck(c: Client, stage_id: int,
     return warning
 
 
-async def make_stone_account(rec: AccountRecord, target_ypoint: int, progress):
+async def buy_stone_hitodama(c: Client, total: int, progress) -> bool:
+    await progress(f'🛒 ひとだまをYマネーで自動購入中（現在 {total}個）...')
+    try:
+        added = await asyncio.to_thread(c.buy_hitodama, HITODAMA_BUY, current=total)
+    except RuntimeError as e:
+        if 'Yマネー不足' not in str(e):
+            raise RuntimeError(f'ひとだまの自動購入に失敗しました: {e}') from e
+        log_line(f'石垢 ひとだま購入不可: {str(e)[:160]}')
+        await progress('⚠ Yマネー不足のためひとだまを購入できません。')
+        return False
+    if added <= 0:
+        raise RuntimeError('ひとだまの自動購入で補充数を確認できませんでした')
+    await asyncio.to_thread(c.refresh)
+    await progress(f'🛒 ひとだまを{added:,}個購入しました')
+    return True
+
+
+async def wait_stone_hitodama(c: Client, stage_id: int, response, progress,
+                              job: StoneAccountJob | None = None) -> bool:
+    await asyncio.to_thread(c.refresh)
+    points = c.points()
+    total = hitodama_total(points)
+    if total is None:
+        return False
+    if not is_hitodama_shortage(response) and not all(
+            points.get(key) is not None for key in ('hitodama', 'freeHitodama')):
+        return False
+    if total > 0:
+        return False
+    if job is not None:
+        job.estimated_finish = None
+    while True:
+        if ACCOUNT_PAUSE['paused'] or maint_window():
+            raise RuntimeError('メンテナンスまたは管理者停止のため中断しました')
+        if await buy_stone_hitodama(c, total, progress):
+            return True
+        await progress(
+            f'🔥 ステージ `{stage_id}`: Yマネー不足のため、ひとだまの自然回復を待っています')
+        info = c.info()
+        try:
+            seconds = int(info.get('hitodamaRecoverSec') or 0)
+        except (ValueError, TypeError):
+            seconds = 0
+        wait = min(max(seconds + 20, 60), HITODAMA_WAIT_MAX) if seconds > 0 else 600
+        while wait > 0:
+            await asyncio.sleep(min(wait, 30))
+            wait -= min(wait, 30)
+            if ACCOUNT_PAUSE['paused'] or maint_window():
+                raise RuntimeError('メンテナンスまたは管理者停止のため中断しました')
+        await asyncio.to_thread(c.refresh)
+        total = hitodama_total(c.points())
+        if total is None:
+            raise RuntimeError(f'ステージ {stage_id}: 回復後のひとだま残数を取得できませんでした')
+        if total > 0:
+            await progress(f'🔥 ひとだまが回復しました（{total}個）。ステージを再開します')
+            return True
+
+
+def update_stone_estimate(job: StoneAccountJob, points: int | None):
+    if points is None:
+        return
+    now = time.monotonic()
+    if job.estimate_start is None:
+        job.estimate_start = now
+        job.estimate_initial_points = points
+    job.estimate_points = points
+    gained = points - job.estimate_initial_points
+    remaining_accounts = job.count - job.current_account
+    if gained <= 0 or (remaining_accounts and not job.success_durations):
+        job.estimated_finish = None
+        return
+    remaining = max(0, job.target_ypoint - points) * (now - job.estimate_start) / gained
+    if remaining_accounts:
+        remaining += remaining_accounts * sum(job.success_durations) / len(job.success_durations)
+    try:
+        job.estimated_finish = datetime.now() + timedelta(seconds=remaining)
+    except OverflowError:
+        job.estimated_finish = None
+
+
+async def make_stone_account(rec: AccountRecord, target_ypoint: int, progress,
+                             job: StoneAccountJob | None = None):
     """イベント通常面を進行し、ボス面で目標Yポイントまで稼ぐ"""
     rec.ypoint_target = target_ypoint
     c = rec.client
@@ -1983,6 +2091,8 @@ async def make_stone_account(rec: AccountRecord, target_ypoint: int, progress):
             raise RuntimeError('現在のYポイントを取得できませんでした')
 
         async def finish_if_reached(points: int | None) -> bool:
+            if job is not None:
+                update_stone_estimate(job, points)
             if points is None or points < target_ypoint:
                 return False
             rec.cleared = True
@@ -1999,6 +2109,30 @@ async def make_stone_account(rec: AccountRecord, target_ypoint: int, progress):
         total_stages = len(unlock_stages) + len(normal_stages) + len(boss_stages)
         stage_number = 0
         priority_youkai = None
+        last_battle = False
+
+        async def stone_clear(stage_id: int):
+            nonlocal last_battle
+            if last_battle:
+                await asyncio.sleep(jitter(
+                    job.cooldown if job else DEFAULT_COOLDOWN, COOLDOWN_MIN))
+            if ACCOUNT_PAUSE['paused'] or maint_window():
+                raise RuntimeError('メンテナンスまたは管理者停止のため中断しました')
+            total = hitodama_total(c.points())
+            if total is not None and total <= HITODAMA_LOW:
+                await asyncio.to_thread(c.refresh)
+                total = hitodama_total(c.points())
+                if total is None:
+                    raise RuntimeError('ひとだまの残数を更新できませんでした')
+                if total <= HITODAMA_LOW:
+                    await buy_stone_hitodama(c, total, progress)
+            reward = await clear_stage(
+                c, stage_id, progress, inspect=False,
+                battle_time=job.battle_time if job else BATTLE_TIME_MIN,
+                shortage_handler=lambda sid, response: wait_stone_hitodama(
+                    c, sid, response, progress, job))
+            last_battle = True
+            return reward
 
         for stage_id in unlock_stages:
             if ACCOUNT_PAUSE['paused'] or maint_window():
@@ -2007,7 +2141,7 @@ async def make_stone_account(rec: AccountRecord, target_ypoint: int, progress):
             await progress(
                 f'🔓 イベント解放のため第1章を進行中... `{stage_id}` '
                 f'（{stage_number}/{total_stages}）')
-            await clear_stage(c, stage_id, progress, inspect=False)
+            await stone_clear(stage_id)
             final_points = c.points().get('ypoint')
             if await finish_if_reached(final_points):
                 return
@@ -2024,7 +2158,7 @@ async def make_stone_account(rec: AccountRecord, target_ypoint: int, progress):
                 f'⚔ {event_name}を進行中... {stage_name} `{stage_id}` '
                 f'（{stage_number}/{total_stages}）')
             await prepare_stone_stage_deck(c, stage_id, priority_youkai, progress)
-            reward_id = await clear_stage(c, stage_id, progress, inspect=False)
+            reward_id = await stone_clear(stage_id)
             is_boss = (stage_id in boss_stages or 'ボス' in stage_name)
             if is_boss and reward_id:
                 try:
@@ -2061,7 +2195,7 @@ async def make_stone_account(rec: AccountRecord, target_ypoint: int, progress):
             if ACCOUNT_PAUSE['paused'] or maint_window():
                 raise RuntimeError('メンテナンスまたは管理者停止のため中断しました')
             await prepare_stone_stage_deck(c, boss_stage, priority_youkai, progress)
-            reward_id = await clear_stage(c, boss_stage, progress, inspect=False)
+            reward_id = await stone_clear(boss_stage)
             attempts += 1
             if reward_id:
                 try:
@@ -3060,55 +3194,182 @@ def stone_progress_embed(user_id: int, page: int = 0) -> discord.Embed:
         timestamp=datetime.now(),
     )
     for job in page_jobs:
+        finish = (f'<t:{int(job.estimated_finish.timestamp())}:F>'
+                  if job.estimated_finish else '推定中（実績不足）')
+        points = ('取得前' if job.estimate_points is None
+                  else f'{job.estimate_points:,} / {job.target_ypoint:,}')
         embed.add_field(
             name=f'#{job.job_id} ・ 石垢進捗 {job.target_ypoint:,} Yポイント',
             value=(f'状態: **{job.status}**\n'
                    f'進捗: **{job.completed}/{job.count}件** ・ 失敗: **{job.failed}件**\n'
+                   f'現在のYポイント: **{points}**\n'
+                   f'終了予定: {finish}（推定・自動停止なし）\n'
                    f'{job.detail[:350]}'),
             inline=False,
         )
+    embed.set_footer(text=f'利用者ID: {user_id} ・ 自動更新')
     return embed
 
 
-class StoneProgressView(discord.ui.View):
-    def __init__(self, owner_id: int, page: int = 0):
-        super().__init__(timeout=300)
+class StoneProgressPanel:
+    def __init__(self, owner_id: int, channel_id: int, message_id: int):
         self.owner_id = owner_id
-        jobs = stone_jobs_for(owner_id)
+        self.channel_id = channel_id
+        self.message_id = message_id
+        self.page = 0
+        self.rendered = None
+        self.lock = asyncio.Lock()
+        self.last_error = None
+
+    def state(self):
+        jobs = stone_jobs_for(self.owner_id)
         page_count = max(1, (len(jobs) + STONE_JOBS_PER_PAGE - 1) // STONE_JOBS_PER_PAGE)
-        self.page = max(0, min(page, page_count - 1))
-        if self.page:
-            previous = discord.ui.Button(label='前へ', style=discord.ButtonStyle.secondary)
-            previous.callback = self._previous
-            self.add_item(previous)
-        refresh = discord.ui.Button(label='更新', style=discord.ButtonStyle.primary)
+        self.page = min(self.page, page_count - 1)
+        return (self.page, tuple(
+            (job.job_id, job.target_ypoint, job.status, job.completed,
+             job.count, job.failed, job.detail[:350],
+             job.estimate_points, job.estimated_finish)
+            for job in jobs))
+
+
+def save_stone_progress_panels() -> bool:
+    records = [
+        {'owner_id': panel.owner_id, 'channel_id': panel.channel_id,
+         'message_id': panel.message_id}
+        for panel in STONE_PROGRESS_PANELS.values()
+    ]
+    try:
+        os.makedirs(os.path.dirname(STONE_PROGRESS_PANELS_FILE), exist_ok=True)
+        tmp = STONE_PROGRESS_PANELS_FILE + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(records, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, STONE_PROGRESS_PANELS_FILE)
+        return True
+    except OSError as e:
+        log_line(f'石垢進捗パネルの保存に失敗: {e}')
+        return False
+
+
+def load_stone_progress_panels() -> None:
+    try:
+        with open(STONE_PROGRESS_PANELS_FILE, encoding='utf-8') as f:
+            records = json.load(f)
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError) as e:
+        log_line(f'石垢進捗パネルの読み込みに失敗: {e}')
+        return
+    if not isinstance(records, list):
+        log_line('石垢進捗パネルの保存形式が不正です')
+        return
+    for record in records:
+        try:
+            panel = StoneProgressPanel(
+                int(record['owner_id']), int(record['channel_id']), int(record['message_id']))
+        except (KeyError, TypeError, ValueError):
+            log_line(f'石垢進捗パネル情報を読み取れません: {record}')
+            continue
+        STONE_PROGRESS_PANELS[panel.message_id] = panel
+
+
+class StoneProgressView(discord.ui.View):
+    def __init__(self, panel: StoneProgressPanel):
+        super().__init__(timeout=None)
+        self.panel = panel
+        jobs = stone_jobs_for(panel.owner_id)
+        page_count = max(1, (len(jobs) + STONE_JOBS_PER_PAGE - 1) // STONE_JOBS_PER_PAGE)
+        previous = discord.ui.Button(
+            label='前へ', style=discord.ButtonStyle.secondary,
+            custom_id=f'ywp:stone_progress:previous:{panel.owner_id}',
+            disabled=panel.page == 0)
+        previous.callback = self._previous
+        self.add_item(previous)
+        refresh = discord.ui.Button(
+            label='更新', style=discord.ButtonStyle.primary,
+            custom_id=f'ywp:stone_progress:refresh:{panel.owner_id}')
         refresh.callback = self._refresh
         self.add_item(refresh)
-        if self.page + 1 < page_count:
-            following = discord.ui.Button(label='次へ', style=discord.ButtonStyle.secondary)
-            following.callback = self._next
-            self.add_item(following)
+        following = discord.ui.Button(
+            label='次へ', style=discord.ButtonStyle.secondary,
+            custom_id=f'ywp:stone_progress:next:{panel.owner_id}',
+            disabled=panel.page + 1 >= page_count)
+        following.callback = self._next
+        self.add_item(following)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.owner_id:
+        if interaction.user.id != self.panel.owner_id:
             await interaction.response.send_message(
                 'この石垢進捗は表示した人だけが操作できます。', ephemeral=True)
             return False
         return True
 
-    async def _show_page(self, interaction: discord.Interaction, page: int):
-        view = StoneProgressView(self.owner_id, page)
-        await interaction.response.edit_message(
-            embed=stone_progress_embed(self.owner_id, view.page), view=view)
+    async def _show_page(self, interaction: discord.Interaction, offset: int):
+        await interaction.response.defer()
+        async with self.panel.lock:
+            previous_page = self.panel.page
+            self.panel.page = max(0, self.panel.page + offset)
+            state = self.panel.state()
+            try:
+                await interaction.edit_original_response(
+                    embed=stone_progress_embed(self.panel.owner_id, self.panel.page),
+                    view=StoneProgressView(self.panel))
+            except discord.HTTPException:
+                self.panel.page = previous_page
+                log_line(f'石垢進捗ページの更新に失敗 message={self.panel.message_id}')
+                await interaction.followup.send(
+                    '❌ 石垢進捗を更新できませんでした。時間をおいて再度お試しください。',
+                    ephemeral=True)
+                return
+            self.panel.rendered = state
 
     async def _previous(self, interaction: discord.Interaction):
-        await self._show_page(interaction, self.page - 1)
+        await self._show_page(interaction, -1)
 
     async def _next(self, interaction: discord.Interaction):
-        await self._show_page(interaction, self.page + 1)
+        await self._show_page(interaction, 1)
 
     async def _refresh(self, interaction: discord.Interaction):
-        await self._show_page(interaction, self.page)
+        await self._show_page(interaction, 0)
+
+
+async def refresh_stone_progress_panel(client, panel: StoneProgressPanel):
+    async with panel.lock:
+        state = panel.state()
+        if state == panel.rendered:
+            return
+        try:
+            channel = client.get_channel(panel.channel_id)
+            if channel is None:
+                channel = await client.fetch_channel(panel.channel_id)
+            if not isinstance(channel, discord.abc.Messageable):
+                raise RuntimeError('送信先がメッセージ対応チャンネルではありません')
+            get_partial_message = getattr(channel, 'get_partial_message', None)
+            if get_partial_message is None:
+                raise RuntimeError('送信先のメッセージを取得できません')
+            message = get_partial_message(panel.message_id)
+            await message.edit(
+                embed=stone_progress_embed(panel.owner_id, panel.page),
+                view=StoneProgressView(panel))
+        except discord.NotFound:
+            STONE_PROGRESS_PANELS.pop(panel.message_id, None)
+            if not save_stone_progress_panels():
+                log_line(f'削除済み石垢進捗パネルの記録を消去できません: {panel.message_id}')
+        except (discord.HTTPException, RuntimeError) as e:
+            error = str(e)[:160]
+            if panel.last_error != error:
+                log_line(f'石垢進捗パネルの更新に失敗 message={panel.message_id}: {error}')
+                panel.last_error = error
+        else:
+            panel.rendered = state
+            panel.last_error = None
+
+
+async def stone_progress_refresh_loop(client):
+    await client.wait_until_ready()
+    while not client.is_closed():
+        for panel in list(STONE_PROGRESS_PANELS.values()):
+            await refresh_stone_progress_panel(client, panel)
+        await asyncio.sleep(10)
 
 
 async def run_stone_account_job(job: StoneAccountJob):
@@ -3129,6 +3390,11 @@ async def run_stone_account_job(job: StoneAccountJob):
                 break
 
             job.current_account = index
+            job.estimate_start = None
+            job.estimate_initial_points = None
+            job.estimate_points = None
+            job.estimated_finish = None
+            account_start = time.monotonic()
             job.detail = f'{index}/{job.count}件目を準備中...'
             rec = None
             interrupted = False
@@ -3145,7 +3411,7 @@ async def run_stone_account_job(job: StoneAccountJob):
                                 player_name=resolve_player_name(job.player_name, index),
                                 proxy=lease.url if lease is not None else None,
                             )
-                            await make_stone_account(rec, job.target_ypoint, progress)
+                            await make_stone_account(rec, job.target_ypoint, progress, job)
                         finally:
                             if lease is not None:
                                 lease.release()
@@ -3165,6 +3431,8 @@ async def run_stone_account_job(job: StoneAccountJob):
                 records.append(rec)
                 if not rec.stone_ok:
                     job.failed += 1
+                else:
+                    job.success_durations.append(time.monotonic() - account_start)
             job.completed += 1
             if rec is not None:
                 job.detail = (
@@ -3206,7 +3474,9 @@ async def run_stone_account_job(job: StoneAccountJob):
 
 async def start_stone_account_job(interaction: discord.Interaction, count: int,
                                   target_ypoint: int, password: str | None,
-                                  player_name: str | None):
+                                  player_name: str | None,
+                                  battle_time: float = DEFAULT_BATTLE_TIME,
+                                  cooldown: float = DEFAULT_COOLDOWN):
     user_id = interaction.user.id
     target_key = (user_id, target_ypoint)
     if target_key in STONE_RUNNING_TARGETS:
@@ -3236,7 +3506,7 @@ async def start_stone_account_job(interaction: discord.Interaction, count: int,
         STONE_JOB_COUNTER += 1
         job = StoneAccountJob(
             STONE_JOB_COUNTER, interaction.user, count, target_ypoint,
-            (password or '').strip() or None, name_template)
+            (password or '').strip() or None, name_template, battle_time, cooldown)
         await dm.send(
             f'🔷 石垢ジョブ #{job.job_id} を受付しました。'
             f'目標: {target_ypoint:,} Yポイント / 作成数: {count}件')
@@ -6771,6 +7041,14 @@ class StoneAccountModal(discord.ui.Modal, title='石垢作成'):
         component=discord.ui.TextInput(placeholder='例: 石垢{n}', required=False,
                                        max_length=PLAYER_NAME_MAX + 3),
     )
+    timing = discord.ui.Label(
+        text='バトル時間, 間隔（秒・任意）',
+        description=(f'空欄で既定値。最低 {BATTLE_TIME_MIN:g}秒 / '
+                     f'{COOLDOWN_MIN:g}秒。例: 10,3'),
+        component=discord.ui.TextInput(
+            placeholder=f'{DEFAULT_BATTLE_TIME:g},{DEFAULT_COOLDOWN:g}',
+            required=False, max_length=30),
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -6787,9 +7065,28 @@ class StoneAccountModal(discord.ui.Modal, title='石垢作成'):
             return await interaction.response.send_message(
                 f'❌ 目標Yポイントは 1〜{WALLET_CAPS["ypoint"]:,} で指定してください。',
                 ephemeral=True)
+        battle_time, cooldown = DEFAULT_BATTLE_TIME, DEFAULT_COOLDOWN
+        timing = self.timing.component.value.strip()
+        if timing:
+            parts = [part.strip() for part in timing.replace('，', ',').split(',')]
+            try:
+                if len(parts) != 2:
+                    raise ValueError
+                battle_time, cooldown = (float(part) for part in parts)
+                if not all(math.isfinite(value) for value in (battle_time, cooldown)):
+                    raise ValueError
+                if not (BATTLE_TIME_MIN <= battle_time <= 86400
+                        and COOLDOWN_MIN <= cooldown <= 86400):
+                    raise ValueError
+            except ValueError:
+                return await interaction.response.send_message(
+                    f'❌ 秒数は `{BATTLE_TIME_MIN:g},{COOLDOWN_MIN:g}` のように'
+                    f'バトル{BATTLE_TIME_MIN:g}〜86400秒、間隔{COOLDOWN_MIN:g}〜86400秒で指定してください。',
+                    ephemeral=True)
         password = self.password.component.value
         await start_stone_account_job(
-            interaction, count, target, password, self.name.component.value)
+            interaction, count, target, password, self.name.component.value,
+            battle_time, cooldown)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
         await report_error(interaction, error, 'StoneAccountModal')
@@ -8796,7 +9093,7 @@ def panel_embed() -> discord.Embed:
             '🔷 **石垢作成**: 目標Yポイントを指定。イベント通常面→ボス面の順で進行し、'
             '制限に合わせて編成\n'
             '↳ 指定数の完了後、メールアドレス・パスワード・最終Yポイントを.txtでDM\n'
-            '↳ 進捗は `/石垢進捗` で確認。同じ目標Yポイントは同時に1ジョブまで\n'
+            '↳ `/石垢進捗` で公開・自動更新パネルを設置。同じ目標Yポイントは同時に1ジョブまで\n'
             '📧 **メールアドレス変更**: ボタンまたは `/メアド変更手順` から手順を確認\n'
             '↳ 確認メール内のリンクを開いて変更を完了（パスワードをBotに入力する必要なし）\n'
             f'🕰 **久垢作成**: ステージ`{AGED_STAGE_ID}`クリア済みのアカウントは '
@@ -9272,6 +9569,12 @@ class YWPBot(commands.Bot):
                     FarmDashboardView(owner_id, selected_jid),
                     message_id=message_id)
             self._farm_dashboard_views_registered = True
+        if not getattr(self, '_stone_progress_views_registered', False):
+            load_stone_progress_panels()
+            for panel in STONE_PROGRESS_PANELS.values():
+                self.add_view(StoneProgressView(panel), message_id=panel.message_id)
+            self._stone_progress_views_registered = True
+            self._stone_progress_task = asyncio.create_task(stone_progress_refresh_loop(self))
         if not getattr(self, '_orders_checked', False):
             self._orders_checked = True
             await report_unfinished_orders()
@@ -9498,7 +9801,9 @@ async def setup_stone_account_panel(interaction: discord.Interaction):
             '作成数と目標Yポイントを指定して石垢を作成します。\n'
             'イベント通常面から進行し、続けてボス面を周回します。\n'
             '種族制限に合わせて編成し、作成結果はDMでお知らせします。\n'
-            '進捗は `/石垢進捗` で確認できます。'
+            'バトル時間と間隔を指定でき、ひとだまはYマネーで自動購入します。\n'
+            'Yマネー不足時は自然回復を待ちます。\n'
+            '`/石垢進捗` で公開・自動更新の進捗パネルを設置できます。'
         ),
         color=COLOR_OK,
     )
@@ -9632,13 +9937,27 @@ async def account_create(interaction: discord.Interaction,
     await start_account_creation(interaction, int(count), password, name)
 
 
-@bot.tree.command(name='石垢進捗', description='実行中の石垢ジョブを10件ずつ表示します')
+@bot.tree.command(name='石垢進捗', description='石垢ジョブの自動更新パネルをこのチャンネルに設置します')
 async def stone_account_progress(interaction: discord.Interaction):
-    user_id = interaction.user.id
-    jobs = stone_jobs_for(user_id)
-    view = StoneProgressView(user_id) if jobs else None
+    panel = StoneProgressPanel(interaction.user.id, interaction.channel_id, 0)
+    initial_state = panel.state()
     await interaction.response.send_message(
-        embed=stone_progress_embed(user_id), view=view, ephemeral=True)
+        embed=stone_progress_embed(panel.owner_id), view=StoneProgressView(panel))
+    try:
+        message = await interaction.original_response()
+    except discord.HTTPException as e:
+        log_line(f'石垢進捗パネルのID取得に失敗 user={panel.owner_id}: {str(e)[:120]}')
+        return await interaction.followup.send(
+            '⚠️ パネルのIDを取得できず、自動更新・再起動後の復元を設定できませんでした。',
+            ephemeral=True)
+    panel.message_id = message.id
+    panel.rendered = initial_state
+    STONE_PROGRESS_PANELS[panel.message_id] = panel
+    bot.add_view(StoneProgressView(panel), message_id=panel.message_id)
+    if not save_stone_progress_panels():
+        await interaction.followup.send(
+            '⚠️ パネルは設置しましたが、再起動後の復元用データを保存できませんでした。',
+            ephemeral=True)
 
 
 @bot.tree.command(name='久垢作成',
