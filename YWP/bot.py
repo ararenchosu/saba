@@ -156,7 +156,7 @@ MAIL_TM_API_URL = 'https://api.mail.tm'
 
 PASSWORD_LEN = 10                # 自動生成パスワードの文字数
 MAIL_WAIT_TIMEOUT = 120.0        # 登録メールを待つ最大秒数
-EMAIL_CHANGE_MANUAL_TIMEOUT = 15 * 60
+EMAIL_CHANGE_WAIT_TIMEOUT = 5 * 60
 MAIL_POLL_INTERVAL = 5.0         # メールボックスの再確認間隔（秒）
 MAX_CONCURRENT_ACCOUNTS = 2      # 同時に作成できるアカウント数の上限
 MAX_CONCURRENT_COIN_TARGET_ACCOUNTS = 5
@@ -1467,7 +1467,7 @@ class MailTmMailbox:
             raise RuntimeError(f'Mail.tm APIの応答形式が不正です (HTTP {status})')
         return data
 
-    async def create_address(self) -> str:
+    async def create_address(self, password: str | None = None) -> str:
         domains_response = await self._request('GET', '/domains')
         domains = domains_response.get('hydra:member') or []
         available = [
@@ -1480,7 +1480,7 @@ class MailTmMailbox:
 
         domain = random.choice(available)
         self.address = f'ywp{secrets.token_hex(8)}@{domain}'
-        self.password = secrets.token_hex(24)
+        self.password = password or secrets.token_hex(24)
         await self._request('POST', '/accounts', payload={
             'address': self.address,
             'password': self.password,
@@ -1493,6 +1493,16 @@ class MailTmMailbox:
         if not self.token:
             raise RuntimeError('Mail.tmから受信トークンを取得できませんでした')
         return self.address
+
+    async def authenticate(self, address: str, password: str) -> None:
+        self.address = address.strip()
+        token_response = await self._request('POST', '/token', payload={
+            'address': self.address,
+            'password': password,
+        })
+        self.token = token_response.get('token')
+        if not self.token:
+            raise RuntimeError('Mail.tmから受信トークンを取得できませんでした')
 
     async def check_email(self) -> list:
         data = await self._request('GET', '/messages', authenticated=True)
@@ -1570,6 +1580,30 @@ class AccountRecord:
         self.stone_error: str | None = None
 
 
+class StoneAccountJob:
+    def __init__(self, job_id: int, user: discord.abc.User, count: int,
+                 target_ypoint: int, password: str | None, player_name: str | None):
+        self.job_id = job_id
+        self.user = user
+        self.count = count
+        self.target_ypoint = target_ypoint
+        self.password = password
+        self.player_name = player_name
+        self.started_at = datetime.now()
+        self.completed = 0
+        self.failed = 0
+        self.current_account = 0
+        self.status = '待機中'
+        self.detail = 'キュー待ち'
+        self.task: asyncio.Task | None = None
+
+
+STONE_JOBS: dict[int, list[StoneAccountJob]] = {}
+STONE_RUNNING_TARGETS: set[tuple[int, int]] = set()
+STONE_JOB_COUNTER = 0
+STONE_JOBS_PER_PAGE = 10
+
+
 def find_auth_token(html: str) -> str | None:
     """登録ページのHTMLからCSRFトークン（authenticity_token）を取り出す"""
     for pat in (r'name="authenticity_token"[^>]*value="([^"]+)"',
@@ -1626,10 +1660,9 @@ async def wait_verification_email(mailbox: MailTmMailbox) -> str | None:
         await asyncio.sleep(MAIL_POLL_INTERVAL)
 
 
-async def wait_email_change_link(mailbox: MailTmMailbox,
-                                 timeout: float = MAIL_WAIT_TIMEOUT) -> str | None:
+async def wait_email_change_link(mailbox: MailTmMailbox) -> str | None:
     """LEVEL5 IDからのメール変更確認リンクをMail.tmで待つ"""
-    deadline = time.time() + timeout
+    deadline = time.time() + EMAIL_CHANGE_WAIT_TIMEOUT
     while True:
         try:
             items = await mailbox.check_email()
@@ -1664,9 +1697,9 @@ async def wait_email_change_link(mailbox: MailTmMailbox,
         await asyncio.sleep(MAIL_POLL_INTERVAL)
 
 
-async def start_level5_email_change(interaction: discord.Interaction,
-                                    current_email: str, password: str):
-    """LEVEL5 IDで変更申請し、Mail.tmの確認リンクを本人へDMする"""
+async def check_manual_email_change(interaction: discord.Interaction,
+                                    mailbox_email: str, mailbox_password: str):
+    """Mail.tmの受信箱を確認し、LEVEL5 IDのメール変更リンクをDMする"""
     user_id = interaction.user.id
     if user_id in ACCOUNT_RUNNING:
         return await interaction.response.send_message(
@@ -1675,7 +1708,6 @@ async def start_level5_email_change(interaction: discord.Interaction,
     ACCOUNT_RUNNING.add(user_id)
     lease = None
     status = None
-    new_email = None
 
     async def update_status(text: str) -> bool:
         if status is None:
@@ -1690,7 +1722,7 @@ async def start_level5_email_change(interaction: discord.Interaction,
     try:
         await interaction.response.defer(ephemeral=True, thinking=True)
         status = await interaction.followup.send(
-            'メール変更の準備をしています...', ephemeral=True, wait=True)
+            'Mail.tmの受信箱に接続しています...', ephemeral=True, wait=True)
         lease = await lease_proxy()
         connector = None
         if lease is not None:
@@ -1700,36 +1732,18 @@ async def start_level5_email_change(interaction: discord.Interaction,
         async with aiohttp.ClientSession(
                 connector=connector, trust_env=lease is None) as session:
             mailbox = MailTmMailbox(session)
-            new_email = await mailbox.create_address()
-            await update_status('LEVEL5 IDへログインしてメール変更を申請しています...')
-            try:
-                await asyncio.to_thread(
-                    ywp_auto.change_level5_email,
-                    current_email.strip(), password, new_email,
-                    proxy=lease.url if lease is not None else None)
-            except ywp_auto.ManualEmailChangeRequired:
-                manual_instructions = (
-                    '自動入力できなかったため、手動で変更してください。\n'
-                    '1. LEVEL5 IDのアカウント情報変更画面を開く:\n'
-                    'https://auth.level5-id.com/user_info_modification?locale=ja\n'
-                    '2. 現在のLEVEL5 IDでログインし、変更先に次のアドレスを入力して申請\n'
-                    f'`{new_email}`\n'
-                    f'申請後、確認メールを最大 {EMAIL_CHANGE_MANUAL_TIMEOUT // 60} 分待ち、'
-                    '届いた確認リンクをDMします。')
-                if not await update_status(manual_instructions):
-                    await interaction.followup.send(manual_instructions, ephemeral=True)
-                link = await wait_email_change_link(
-                    mailbox, timeout=EMAIL_CHANGE_MANUAL_TIMEOUT)
-            else:
-                await update_status(
-                    f'変更確認メールを待っています（最大 {int(MAIL_WAIT_TIMEOUT)} 秒）...')
-                link = await wait_email_change_link(mailbox)
+            await mailbox.authenticate(mailbox_email, mailbox_password)
+            await update_status(
+                f'{mailbox.address} の確認メールを検索しています'
+                f'（最大 {int(EMAIL_CHANGE_WAIT_TIMEOUT)} 秒）...')
+            link = await wait_email_change_link(mailbox)
             if link is None:
-                raise RuntimeError('確認メールが届きませんでした。新しいメールアドレスが受け付けられたか確認してください')
+                raise RuntimeError(
+                    '確認メールが見つかりませんでした。Mail.tmのアドレスとパスワード、'
+                    'およびLEVEL5 IDで申請した宛先を確認してください')
 
         message = (f'LEVEL5 IDのメールアドレス変更確認リンクです。\n'
-                   f'新しいメールアドレス: `{new_email}`\n'
-                   'メール受信: https://mail.tm\n'
+                   f'受信メールアドレス: `{mailbox_email.strip()}`\n'
                    f'リンクを開いて変更を完了してください:\n{link}')
         try:
             await interaction.user.send(message)
@@ -1738,10 +1752,8 @@ async def start_level5_email_change(interaction: discord.Interaction,
             await update_status('⚠ DMを送れなかったため、この個人用メッセージに確認リンクを表示します。')
             await interaction.followup.send(message, ephemeral=True)
     except Exception as e:
-        log_line(f'LEVEL5メール変更に失敗 user={user_id}: {str(e)[:180]}')
+        log_line(f'LEVEL5メール変更確認に失敗 user={user_id}: {str(e)[:180]}')
         text = f'❌ メール変更を完了できませんでした: `{str(e)[:220]}`'
-        if new_email:
-            text += f'\n申請に使用した新しいアドレス: `{new_email}`'
         if await update_status(text):
             return
         try:
@@ -1749,7 +1761,7 @@ async def start_level5_email_change(interaction: discord.Interaction,
         except discord.HTTPException as send_error:
             log_line(f'メール変更エラー通知に失敗 user={user_id}: {str(send_error)[:120]}')
     finally:
-        current_email = password = None
+        mailbox_password = None
         try:
             if lease is not None:
                 lease.release()
@@ -1770,6 +1782,7 @@ async def create_level5_account(progress, password: str | None = None,
     proxy: 指定時（プロキシプールから借りた出口）、登録フロー・捨てメール・
            セーブ作成の通信すべてがそのプロキシを通る
     """
+    password = (password or '').strip() or generate_password()
     # trust_env=True で ywp_auto.set_proxy() が立てた HTTP_PROXY を拾う
     # （LEVEL5 ID の登録フローと捨てメールも同じ出口を通す）。
     # proxy 指定のときは全体設定ではなく、その出口だけを通る（SOCKS も可）
@@ -1783,7 +1796,7 @@ async def create_level5_account(progress, password: str | None = None,
         # --- 捨てメールアドレスを生成 ---
         await progress('📧 捨てメールアドレスを生成中...')
         mailbox = MailTmMailbox(session)
-        email = await mailbox.create_address()
+        email = await mailbox.create_address(password=password)
         print(f'[account] 一時メール: {email}')
 
         # --- 仮登録 ---
@@ -1836,7 +1849,6 @@ async def create_level5_account(progress, password: str | None = None,
 
         # --- パスワード登録（本登録） ---
         await progress('🔐 パスワードを登録中...')
-        password = (password or '').strip() or generate_password()
         headers = dict(BROWSER_HEADERS)
         headers['Referer'] = verify_url
         async with session.post(register_url, headers=headers, data={
@@ -2927,8 +2939,7 @@ async def start_account_creation(interaction: discord.Interaction, count: int = 
                                  player_name: str | None = None,
                                  aged: bool = False, vip: int | None = None,
                                  coin_gacha: bool = False,
-                                 order: str | None = None, price: int = 0,
-                                 ypoint_target: int | None = None):
+                                 order: str | None = None, price: int = 0):
     """「アカウント作成」/「久垢作成」/「回し放題垢作成」の共通入口。count件ぶん連続で作成する
 
     password    固定パスワード。空欄なら1件ごとにランダム生成
@@ -2936,15 +2947,13 @@ async def start_account_creation(interaction: discord.Interaction, count: int = 
     aged        Trueならセーブ作成後に AGED_STAGE_ID をクリアさせる（久垢）
     vip         連数を渡すと、第1章16面をクリアしてから まわし放題ガシャを引く（回し放題垢）
     coin_gacha  Trueなら第1章1〜15面をクリアして所持コインをすべて使う
-    ypoint_target 指定時は石垢としてイベント進行・ボス周回を行い、Yポイント目標で止める
     order       有料版の取引番号（支払い確認済み）。回し放題まで済んだ垢が count 件そろうまで
                 作り直し（VIP_PAID_RETRY）、足りなければお客様とオーナーに知らせる
     price       有料版で受け取った金額（完了実績に載せる）
     ACCOUNT_TXT_THRESHOLD 件以上まとめて作るときは、1件ずつDMせずに
     最後に「メアド:パスワード」の .txt をDMで送る。
     """
-    kind = ('石垢' if ypoint_target is not None else
-            'コインガチャ初期垢' if coin_gacha else
+    kind = ('コインガチャ初期垢' if coin_gacha else
             '久垢' if aged else '回し放題垢' if vip else '通常垢')
     fixed_password = (password or '').strip() or None
     name_tpl = (player_name or '').strip() or None
@@ -2958,7 +2967,7 @@ async def start_account_creation(interaction: discord.Interaction, count: int = 
         await interaction.response.defer(ephemeral=True, thinking=True)
     ACCOUNT_RUNNING.add(interaction.user.id)
 
-    bulk = ypoint_target is not None or count >= ACCOUNT_TXT_THRESHOLD
+    bulk = count >= ACCOUNT_TXT_THRESHOLD
     records: list[AccountRecord] = []
     ng_count = 0
     started_at = datetime.now()
@@ -3019,11 +3028,7 @@ async def start_account_creation(interaction: discord.Interaction, count: int = 
                         await progress(f'{head}❌ {i}件目は失敗: `{str(e)[:200]}`')
                         continue
 
-                    if ypoint_target is not None:
-                        await make_stone_account(
-                            rec, ypoint_target,
-                            lambda t, h=head: progress(h + t))
-                    elif coin_gacha:
+                    if coin_gacha:
                         log_line(f'コインガチャ初期垢 開始 email={rec.email}')
                         await make_coin_gacha_account(rec, lambda t, h=head: progress(h + t))
                     # 久垢はここで初回ステージまでクリアさせる
@@ -3108,10 +3113,6 @@ async def start_account_creation(interaction: discord.Interaction, count: int = 
             pulled = sum(1 for r in records if r.coin_gacha_ok)
             summary += f'\n⚔ 第1章1〜15面クリア: {cleared}件 / {len(records)}件'
             summary += f'\n🎰 コインガチャ完了: {pulled}件 / {len(records)}件'
-        if ypoint_target is not None:
-            done = sum(1 for r in records if r.stone_ok)
-            summary += f'\n🔷 Yポイント目標到達: {done}件 / {len(records)}件'
-            summary += f'\n🎯 1垢あたりの目標: {ypoint_target:,} Yポイント'
         if vip:
             done = sum(1 for r in records if r.vip_ok)
             summary += f'\n🎰 第1章クリア＋まわし放題ガシャ: {done}件 / {len(records)}件'
@@ -3150,6 +3151,232 @@ async def start_account_creation(interaction: discord.Interaction, count: int = 
         summary += ('\n📄 メアド/パスワードは .txt にまとめてDMへ送りました。' if bulk and records
                     else '\nメールアドレスとパスワードは上のメッセージとDMで確認してください。')
         await progress(summary)
+
+
+def stone_jobs_for(user_id: int) -> list[StoneAccountJob]:
+    return sorted(STONE_JOBS.get(user_id, []), key=lambda job: job.job_id)
+
+
+def stone_job_count() -> int:
+    return sum(len(jobs) for jobs in STONE_JOBS.values())
+
+
+def stone_progress_embed(user_id: int, page: int = 0) -> discord.Embed:
+    jobs = stone_jobs_for(user_id)
+    page_count = max(1, (len(jobs) + STONE_JOBS_PER_PAGE - 1) // STONE_JOBS_PER_PAGE)
+    page = max(0, min(page, page_count - 1))
+    page_jobs = jobs[page * STONE_JOBS_PER_PAGE:(page + 1) * STONE_JOBS_PER_PAGE]
+    targets = {job.target_ypoint for job in page_jobs}
+    title = '🔷 石垢進捗'
+    if len(targets) == 1:
+        title += f' {next(iter(targets)):,} Yポイント'
+    embed = discord.Embed(
+        title=title,
+        description=(f'稼働中: **{len(jobs)}件** ・ ページ **{page + 1}/{page_count}**'
+                     if jobs else '現在、実行中の石垢ジョブはありません。'),
+        color=COLOR_RUN if jobs else COLOR_INFO,
+        timestamp=datetime.now(),
+    )
+    for job in page_jobs:
+        embed.add_field(
+            name=f'#{job.job_id} ・ 石垢進捗 {job.target_ypoint:,} Yポイント',
+            value=(f'状態: **{job.status}**\n'
+                   f'進捗: **{job.completed}/{job.count}件** ・ 失敗: **{job.failed}件**\n'
+                   f'{job.detail[:350]}'),
+            inline=False,
+        )
+    return embed
+
+
+class StoneProgressView(discord.ui.View):
+    def __init__(self, owner_id: int, page: int = 0):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        jobs = stone_jobs_for(owner_id)
+        page_count = max(1, (len(jobs) + STONE_JOBS_PER_PAGE - 1) // STONE_JOBS_PER_PAGE)
+        self.page = max(0, min(page, page_count - 1))
+        if self.page:
+            previous = discord.ui.Button(label='前へ', style=discord.ButtonStyle.secondary)
+            previous.callback = self._previous
+            self.add_item(previous)
+        refresh = discord.ui.Button(label='更新', style=discord.ButtonStyle.primary)
+        refresh.callback = self._refresh
+        self.add_item(refresh)
+        if self.page + 1 < page_count:
+            following = discord.ui.Button(label='次へ', style=discord.ButtonStyle.secondary)
+            following.callback = self._next
+            self.add_item(following)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                'この石垢進捗は表示した人だけが操作できます。', ephemeral=True)
+            return False
+        return True
+
+    async def _show_page(self, interaction: discord.Interaction, page: int):
+        view = StoneProgressView(self.owner_id, page)
+        await interaction.response.edit_message(
+            embed=stone_progress_embed(self.owner_id, view.page), view=view)
+
+    async def _previous(self, interaction: discord.Interaction):
+        await self._show_page(interaction, self.page - 1)
+
+    async def _next(self, interaction: discord.Interaction):
+        await self._show_page(interaction, self.page + 1)
+
+    async def _refresh(self, interaction: discord.Interaction):
+        await self._show_page(interaction, self.page)
+
+
+async def run_stone_account_job(job: StoneAccountJob):
+    records: list[AccountRecord] = []
+    ng_count = 0
+    stopped = False
+
+    async def progress(text: str):
+        job.detail = text[:900]
+
+    try:
+        job.status = '作成中'
+        for index in range(1, job.count + 1):
+            if ACCOUNT_PAUSE['paused'] or maint_window():
+                stopped = True
+                job.status = '停止'
+                job.detail = '管理者停止またはメンテナンスのため、残りの作成を中止しました。'
+                break
+
+            job.current_account = index
+            job.detail = f'{index}/{job.count}件目を準備中...'
+            rec = None
+            interrupted = False
+            try:
+                async with ACCOUNT_SEM, log_tag(f'stone#{job.job_id}-account#{index}'):
+                    if ACCOUNT_PAUSE['paused'] or maint_window():
+                        interrupted = True
+                    else:
+                        lease = await lease_proxy()
+                        try:
+                            rec = await create_level5_account(
+                                progress,
+                                password=job.password,
+                                player_name=resolve_player_name(job.player_name, index),
+                                proxy=lease.url if lease is not None else None,
+                            )
+                            await make_stone_account(rec, job.target_ypoint, progress)
+                        finally:
+                            if lease is not None:
+                                lease.release()
+            except Exception as e:
+                ng_count += 1
+                job.failed += 1
+                log_line(f'石垢ジョブ #{job.job_id} {index}件目の作成に失敗: {str(e)[:160]}')
+                job.detail = f'{index}/{job.count}件目の作成に失敗: {str(e)[:500]}'
+
+            if interrupted:
+                stopped = True
+                job.status = '停止'
+                job.detail = '順番待ち中に管理者停止またはメンテナンスになったため中止しました。'
+                break
+            if rec is not None:
+                rec.client = None
+                records.append(rec)
+                if not rec.stone_ok:
+                    job.failed += 1
+            job.completed += 1
+            if rec is not None:
+                job.detail = (
+                    f'{index}/{job.count}件目完了: '
+                    f'{rec.final_ypoint if rec.final_ypoint is not None else "不明"} Yポイント')
+
+        job.status = '結果送信中'
+        finished_at = datetime.now()
+        report = accounts_txt(records, job.started_at, finished_at, '石垢', ng_count)
+        if not records:
+            report = report.replace('目標Yポイント: 不明',
+                                    f'目標Yポイント: {job.target_ypoint:,}')
+        if stopped:
+            report += '\n\n管理者停止またはメンテナンスにより、残りの作成を中止しました。'
+        filename = f'stone_accounts_{job.started_at:%Y%m%d_%H%M}_{job.job_id}.txt'
+        try:
+            await job.user.send(
+                f'🏁 石垢ジョブ #{job.job_id}（{job.target_ypoint:,} Yポイント）終了。',
+                file=discord.File(io.BytesIO(report.encode('utf-8')), filename=filename),
+            )
+            job.detail = f'完了。成功 {len(records)}件、失敗 {job.failed}件。結果をDMしました。'
+        except discord.HTTPException as e:
+            log_line(f'石垢ジョブ #{job.job_id} 結果DMに失敗 user={job.user.id}: {str(e)[:120]}')
+            job.detail = '完了しましたが、結果をDMできませんでした。DM受信設定を確認してください。'
+        job.status = '完了' if not stopped else '中断'
+    except Exception as e:
+        job.status = '失敗'
+        job.detail = f'ジョブを継続できませんでした: {str(e)[:500]}'
+        log_line(f'石垢ジョブ #{job.job_id} が異常終了: {str(e)[:180]}')
+    finally:
+        STONE_RUNNING_TARGETS.discard((job.user.id, job.target_ypoint))
+        job.password = None
+        jobs = STONE_JOBS.get(job.user.id, [])
+        if job in jobs:
+            jobs.remove(job)
+        if not jobs:
+            STONE_JOBS.pop(job.user.id, None)
+
+
+async def start_stone_account_job(interaction: discord.Interaction, count: int,
+                                  target_ypoint: int, password: str | None,
+                                  player_name: str | None):
+    user_id = interaction.user.id
+    target_key = (user_id, target_ypoint)
+    if target_key in STONE_RUNNING_TARGETS:
+        return await interaction.response.send_message(
+            f'⏳ {target_ypoint:,} Yポイントの石垢ジョブは既に実行中です。'
+            '同じ目標のジョブが終了してから再度お試しください。',
+            ephemeral=True)
+    name_template = (player_name or '').strip() or None
+    if name_template and len(name_template.replace('{n}', '')) > PLAYER_NAME_MAX:
+        return await interaction.response.send_message(
+            f'❌ アカウント名は {PLAYER_NAME_MAX} 文字以内で指定してください。',
+            ephemeral=True)
+    if ACCOUNT_PAUSE['paused']:
+        return await interaction.response.send_message(
+            '⏸ 現在、アカウント作成は管理者により停止中です。', ephemeral=True)
+    mw = maint_window()
+    if mw:
+        return await interaction.response.send_message(
+            f'🛠 メンテ（{maint_text(mw)}）のため、アカウント作成を開始できません。',
+            ephemeral=True)
+
+    STONE_RUNNING_TARGETS.add(target_key)
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        dm = await interaction.user.create_dm()
+        global STONE_JOB_COUNTER
+        STONE_JOB_COUNTER += 1
+        job = StoneAccountJob(
+            STONE_JOB_COUNTER, interaction.user, count, target_ypoint,
+            (password or '').strip() or None, name_template)
+        await dm.send(
+            f'🔷 石垢ジョブ #{job.job_id} を受付しました。'
+            f'目標: {target_ypoint:,} Yポイント / 作成数: {count}件')
+        STONE_JOBS.setdefault(user_id, []).append(job)
+        job.task = asyncio.create_task(run_stone_account_job(job))
+    except discord.Forbidden:
+        STONE_RUNNING_TARGETS.discard(target_key)
+        await interaction.followup.send(
+            '❌ DMを送信できないため、石垢作成を開始していません。'
+            'BotからのDMを受信できる設定にしてください。',
+            ephemeral=True)
+        return
+    except Exception:
+        STONE_RUNNING_TARGETS.discard(target_key)
+        raise
+    try:
+        await interaction.followup.send(
+            f'✅ 石垢ジョブ #{job.job_id} を開始しました。'
+            '進捗は `/石垢進捗` で確認できます。',
+            ephemeral=True)
+    except discord.HTTPException as e:
+        log_line(f'石垢ジョブ #{job.job_id} 開始通知に失敗 user={user_id}: {str(e)[:120]}')
 
 
 # ============================================================================
@@ -3319,6 +3546,7 @@ class FarmJob:
         self.drop_enabled = True
         self.auto_deck = False
         self.deck_priority_refresh = False
+        self.force_priority_deck = False
         self.befriends = 0          # 仲間になった回数（どのジョブでも数える）
         self.befriend_counts: collections.Counter = collections.Counter()   # 妖怪ID→回数
         self.item_counts: collections.Counter = collections.Counter()       # アイテムID→個数
@@ -4524,9 +4752,12 @@ async def auto_deck_after(job: FarmJob, c: Client, start: dict, yid: int) -> str
     return f'⚠ 編成できませんでした（rc={code}）'
 
 
-async def ensure_auto_deck_priority(job: FarmJob, c: Client):
+async def ensure_auto_deck_priority(job: FarmJob, c: Client,
+                                    force: bool = False) -> str:
+    if not (force or job.auto_deck):
+        return '自動編成が無効です。'
     if AUTO_DECK_PRIORITY_YOUKAI_ID not in c.youkai_attack():
-        return
+        return 'このアカウントは極ツチノコを所持していません。'
     deck, _ = c.current_deck()
     if AUTO_DECK_PRIORITY_YOUKAI_ID not in deck:
         try:
@@ -4536,15 +4767,20 @@ async def ensure_auto_deck_priority(job: FarmJob, c: Client):
                 prioritize=AUTO_DECK_PRIORITY_YOUKAI_ID)
         except Exception as e:
             log_line(f'極ツチノコの優先編成に失敗（周回は続ける）: {str(e)[:150]}')
-            return
+            return f'編成に失敗しました: {str(e)[:100]}'
         if code != 0:
             log_line(f'極ツチノコの優先編成に失敗: deckEdit rc={code}')
-            return
+            return f'編成に失敗しました（rc={code}）。'
         log_line(f'自動編成で極ツチノコを追加（外した妖怪: {out or "なし"}）')
         deck, _ = c.current_deck()
 
-    ordered = [y for y in deck if y != AUTO_DECK_PRIORITY_YOUKAI_ID]
-    ordered = ordered[:4] + [AUTO_DECK_PRIORITY_YOUKAI_ID]
+    ordered = list(dict.fromkeys(
+        y for y in (*deck, *c.strongest_deck())
+        if y != AUTO_DECK_PRIORITY_YOUKAI_ID
+    ))[:4]
+    if len(ordered) < 4:
+        return '極ツチノコ以外に4体以上所持していないため、5枠目には配置できません。'
+    ordered.append(AUTO_DECK_PRIORITY_YOUKAI_ID)
     if ordered == deck:
         job.deck_order = list(deck)
         return
@@ -4552,12 +4788,13 @@ async def ensure_auto_deck_priority(job: FarmJob, c: Client):
         code = await asyncio.to_thread(c.deck_edit, ordered)
     except Exception as e:
         log_line(f'極ツチノコを5枠目に移動できませんでした（周回は続ける）: {str(e)[:150]}')
-        return
+        return f'5枠目への移動に失敗しました: {str(e)[:100]}'
     if code != 0:
         log_line(f'極ツチノコを5枠目に移動できませんでした: deckEdit rc={code}')
-        return
+        return f'5枠目への移動に失敗しました（rc={code}）。'
     job.deck_order = list(ordered)
     log_line(f'自動編成: 極ツチノコを5枠目に固定 {deck} → {ordered}')
+    return '極ツチノコを5枠目に編成しました。'
 
 
 def deck_kept(c: Client) -> list[str]:
@@ -5249,6 +5486,14 @@ async def _run_job(job: FarmJob, email: str, password: str,
                 if job.deck_priority_refresh:
                     job.deck_priority_refresh = False
                     await ensure_auto_deck_priority(job, c)
+                if job.force_priority_deck:
+                    job.force_priority_deck = False
+                    result = await ensure_auto_deck_priority(job, c, force=True)
+                    try:
+                        await send_job_message(job, f'👑 #{job.jid} 極ツチノコ編成: {result}')
+                        await update_farm_dashboard(job.user, job.jid)
+                    except discord.HTTPException as e:
+                        log_line(f'極ツチノコ編成結果の通知に失敗 user={job.user.id}: {str(e)[:120]}')
                 if await wait_maintenance(job):      # メンテの5分前から新しいバトルを始めない
                     break
                 if await wait_event_end(job):         # イベント終了5分前なら自動停止
@@ -5729,6 +5974,11 @@ class FarmDashboardView(discord.ui.View):
             custom_id=f'ywp:dashboard:food:{owner_id}', row=1,
             disabled=selected_jid is None))
         self.children[-1].callback = self._food_job
+        self.add_item(discord.ui.Button(
+            label='極ツチノコ編成', emoji='👑', style=discord.ButtonStyle.primary,
+            custom_id=f'ywp:dashboard:priority:{owner_id}', row=1,
+            disabled=selected_jid is None))
+        self.children[-1].callback = self._priority_job
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -5826,6 +6076,22 @@ class FarmDashboardView(discord.ui.View):
             + (f'・好物 {FOOD_MODES.get(job.food_mode, job.food_mode)}' if job.drop_enabled else '')
             + '）。次のバトルから反映されます。',
             view=FoodModeView(self.owner_id, job), ephemeral=True)
+
+    async def _priority_job(self, interaction: discord.Interaction):
+        job = self._selected_job(interaction)
+        if job is None:
+            return await interaction.response.send_message(
+                '編成するアカウントを選択してください。', ephemeral=True)
+        if job.force_priority_deck:
+            return await interaction.response.send_message(
+                '極ツチノコ編成はすでに予約されています。', ephemeral=True)
+        job.force_priority_deck = True
+        persist_jobs()
+        await interaction.response.send_message(
+            f'👑 **#{job.jid}** の極ツチノコ編成を予約しました。'
+            '安全のため、次のバトル開始前に5枠目へ設定します。'
+            + ('一時停止中の場合は、再開後に反映します。' if job.is_paused else ''),
+            ephemeral=True)
 
 
 class CancelView(discord.ui.View):
@@ -6559,7 +6825,7 @@ class AccountCountModal(discord.ui.Modal, title='アカウント作成'):
     )
     password = discord.ui.Label(
         text='パスワード（固定・任意）',
-        description='空欄なら毎回ランダム生成。入力すると全アカウントで同じパスワードになります',
+        description='空欄なら毎回ランダム生成。固定時は全件でLEVEL5 ID/Mail.tm共通',
         component=discord.ui.TextInput(
             placeholder='空欄でランダム生成', required=False, max_length=100),
     )
@@ -6613,7 +6879,7 @@ class StoneAccountModal(discord.ui.Modal, title='石垢作成'):
     )
     password = discord.ui.Label(
         text='パスワード（固定・任意）',
-        description='空欄ならアカウントごとにランダム生成',
+        description='空欄ならランダム生成。入力時はLEVEL5 ID/Mail.tm共通',
         component=discord.ui.TextInput(placeholder='空欄でランダム生成',
                                        required=False, max_length=100),
     )
@@ -6639,9 +6905,10 @@ class StoneAccountModal(discord.ui.Modal, title='石垢作成'):
             return await interaction.response.send_message(
                 f'❌ 目標Yポイントは 1〜{WALLET_CAPS["ypoint"]:,} で指定してください。',
                 ephemeral=True)
-        await start_account_creation(
-            interaction, count, self.password.component.value,
-            self.name.component.value, ypoint_target=target)
+        password = self.password.component.value
+        self.password.component.value = ''
+        await start_stone_account_job(
+            interaction, count, target, password, self.name.component.value)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
         await report_error(interaction, error, 'StoneAccountModal')
@@ -6689,25 +6956,30 @@ class AccountModeView(discord.ui.View):
         await interaction.response.send_modal(StoneAccountModal())
 
 
-class EmailChangeModal(discord.ui.Modal, title='メールアドレス変更'):
+class EmailChangeModal(discord.ui.Modal, title='Mail.tmの受信箱を確認'):
     email = discord.ui.Label(
-        text='現在のメールアドレス',
-        component=discord.ui.TextInput(placeholder='LEVEL5 IDに登録中のアドレス',
+        text='Mail.tmのメールアドレス',
+        component=discord.ui.TextInput(placeholder='変更申請先のMail.tmアドレス',
                                        max_length=120),
     )
     password = discord.ui.Label(
-        text='LEVEL5 IDパスワード',
-        description='変更申請にだけ使用し、保存・ログ出力しません',
-        component=discord.ui.TextInput(placeholder='現在のパスワード', max_length=100),
+        text='Mail.tmのパスワード',
+        description='受信確認にだけ使用し、保存・ログ出力しません',
+        component=discord.ui.TextInput(placeholder='Mail.tmアカウントのパスワード',
+                                       max_length=100),
     )
 
     async def on_submit(self, interaction: discord.Interaction):
         email = self.email.component.value.strip()
+        password = self.password.component.value
+        self.password.component.value = ''
         if '@' not in email or any(char.isspace() for char in email):
             return await interaction.response.send_message(
-                '❌ メールアドレスの形式を確認してください。', ephemeral=True)
-        await start_level5_email_change(
-            interaction, email, self.password.component.value)
+                '❌ Mail.tmのメールアドレス形式を確認してください。', ephemeral=True)
+        try:
+            await check_manual_email_change(interaction, email, password)
+        finally:
+            password = None
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
         await report_error(interaction, error, 'EmailChangeModal')
@@ -6721,10 +6993,6 @@ class StoneAccountPanelView(discord.ui.View):
                        emoji='🔷', custom_id='ywp:stone:create')
     async def create_stone_account(self, interaction: discord.Interaction,
                                    button: discord.ui.Button):
-        if interaction.user.id in ACCOUNT_RUNNING:
-            return await interaction.response.send_message(
-                '⏳ アカウント作成が実行中です。完了までお待ちください。',
-                ephemeral=True)
         await interaction.response.send_modal(StoneAccountModal())
 
 
@@ -6732,7 +7000,7 @@ class EmailChangePanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label='メールアドレスを変更', style=discord.ButtonStyle.primary,
+    @discord.ui.button(label='申請しました', style=discord.ButtonStyle.primary,
                        emoji='📧', custom_id='ywp:email_change:open')
     async def change_email(self, interaction: discord.Interaction,
                            button: discord.ui.Button):
@@ -8134,14 +8402,11 @@ class PanelView(discord.ui.View):
                        emoji='🆕', custom_id='ywp:account')
     async def create_account(self, interaction: discord.Interaction,
                              button: discord.ui.Button):
-        if interaction.user.id in ACCOUNT_RUNNING:
-            return await interaction.response.send_message(
-                '⏳ アカウント作成が実行中です。完了までお待ちください。', ephemeral=True)
         await interaction.response.send_message(
             '作成するアカウントの種類を選んでください。',
             view=AccountModeView(interaction.user.id), ephemeral=True)
 
-    @discord.ui.button(label='メールアドレス変更', style=discord.ButtonStyle.secondary,
+    @discord.ui.button(label='申請後のメールを確認', style=discord.ButtonStyle.secondary,
                        emoji='📧', custom_id='ywp:email_change')
     async def email_change(self, interaction: discord.Interaction,
                            button: discord.ui.Button):
@@ -8229,6 +8494,13 @@ class SettingSelectView(discord.ui.View):
 
 
 def settings_embed() -> discord.Embed:
+    running_accounts = len(ACCOUNT_RUNNING)
+    running_stone_jobs = stone_job_count()
+    running_details = []
+    if running_accounts:
+        running_details.append(f'通常作成 {running_accounts}人')
+    if running_stone_jobs:
+        running_details.append(f'石垢ジョブ {running_stone_jobs}件')
     e = discord.Embed(
         title='⚙ 管理パネル — 現在の設定',
         description='⚙ **設定変更** で1項目ずつ書き換えられます。変更は即座に反映され、'
@@ -8237,8 +8509,8 @@ def settings_embed() -> discord.Embed:
         timestamp=datetime.now(),
     )
     e.add_field(name='🆕 アカウント作成',
-                value=account_pause_text() + (f'（実行中 {len(ACCOUNT_RUNNING)}人）'
-                                              if ACCOUNT_RUNNING else ''),
+                value=account_pause_text() + (
+                    f'（{" / ".join(running_details)}）' if running_details else ''),
                 inline=False)
     mw = maint_window()
     upcoming = [it for it in _maint_items() if it.get('start', '') > datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -8315,10 +8587,13 @@ class AdminPanelView(discord.ui.View):
                 ephemeral=True)
         saved = set_account_pause(True, interaction.user)
         running = len(ACCOUNT_RUNNING)
+        stone_jobs = stone_job_count()
         await interaction.response.send_message(
             '⏸ アカウント作成を**停止**しました。新しい作成は受け付けません。\n'
-            + (f'実行中の作成（{running}人ぶん）は、作り途中の1件を終えたところで終了し、'
-               'それまでに作れたぶんをいつもどおりDMで渡します。' if running
+            + (f'実行中の通常作成 {running}人・石垢ジョブ {stone_jobs}件を停止します。'
+               '処理中のアカウントは1件を終えたところで止め、待機中の石垢ジョブは'
+               '順番が来た時点で作成を開始せずに停止します。'
+               if running or stone_jobs
                else '実行中の作成はありません。')
             + ('' if saved else '\n⚠ 停止状態をファイルに保存できませんでした'
                '（Botを再起動すると受付中に戻ります）。'),
@@ -8635,8 +8910,9 @@ def panel_embed() -> discord.Embed:
             '🔷 **石垢作成**: 目標Yポイントを指定。イベント通常面→ボス面の順で進行し、'
             '制限に合わせて編成\n'
             '↳ 指定数の完了後、メールアドレス・パスワード・最終Yポイントを.txtでDM\n'
-            '📧 **メールアドレス変更**: LEVEL5 IDにログインして変更申請し、確認リンクをDM\n'
-            '↳ パスワードは申請時のみ使用し、保存・ログ出力しません\n'
+            '↳ 進捗は `/石垢進捗` で確認。同じ目標Yポイントは同時に1ジョブまで\n'
+            '📧 **メールアドレス変更**: LEVEL5 IDで手動申請後、確認メールをDM\n'
+            '↳ 申請後に「申請しました」を押し、Mail.tmの受信情報を入力\n'
             f'🕰 **久垢作成**: ステージ`{AGED_STAGE_ID}`クリア済みのアカウントは '
             '`/久垢作成設置` のパネルから作成\n\n'
             '💡 ステージIDが不明なら **📋 ステージ一覧** を確認\n'
@@ -9335,7 +9611,8 @@ async def setup_stone_account_panel(interaction: discord.Interaction):
         description=(
             '作成数と目標Yポイントを指定して石垢を作成します。\n'
             'イベント通常面から進行し、続けてボス面を周回します。\n'
-            '種族制限に合わせて編成し、作成結果はDMでお知らせします。'
+            '種族制限に合わせて編成し、作成結果はDMでお知らせします。\n'
+            '進捗は `/石垢進捗` で確認できます。'
         ),
         color=COLOR_OK,
     )
@@ -9359,8 +9636,10 @@ async def setup_email_change_panel(interaction: discord.Interaction):
     embed = discord.Embed(
         title='📧 メールアドレス変更',
         description=(
-            'LEVEL5 IDに登録中のメールアドレスとパスワードを入力して変更を申請します。\n'
-            '確認リンクはDMでお送りします。パスワードは申請時のみ使用し、保存しません。'
+            '1. LEVEL5 IDのアカウント情報変更ページで、Mail.tm宛てに変更申請します。\n'
+            'https://auth.level5-id.com/user_info_modification?locale=ja\n'
+            '2. 申請後に「申請しました」を押し、Mail.tmのアドレスとパスワードを入力します。\n'
+            'Botが確認メールを探し、リンクをDMします。Mail.tmのパスワードは保存しません。'
         ),
         color=COLOR_OK,
     )
@@ -9461,6 +9740,15 @@ async def account_create(interaction: discord.Interaction,
                          password: str | None = None,
                          name: str | None = None):
     await start_account_creation(interaction, int(count), password, name)
+
+
+@bot.tree.command(name='石垢進捗', description='実行中の石垢ジョブを10件ずつ表示します')
+async def stone_account_progress(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    jobs = stone_jobs_for(user_id)
+    view = StoneProgressView(user_id) if jobs else None
+    await interaction.response.send_message(
+        embed=stone_progress_embed(user_id), view=view, ephemeral=True)
 
 
 @bot.tree.command(name='久垢作成',
