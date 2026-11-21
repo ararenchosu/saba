@@ -6696,6 +6696,36 @@ class EmailChangeModal(discord.ui.Modal, title='メールアドレス変更'):
         await report_error(interaction, error, 'EmailChangeModal')
 
 
+class StoneAccountPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label='石垢を作成', style=discord.ButtonStyle.success,
+                       emoji='🔷', custom_id='ywp:stone:create')
+    async def create_stone_account(self, interaction: discord.Interaction,
+                                   button: discord.ui.Button):
+        if interaction.user.id in ACCOUNT_RUNNING:
+            return await interaction.response.send_message(
+                '⏳ アカウント作成が実行中です。完了までお待ちください。',
+                ephemeral=True)
+        await interaction.response.send_modal(StoneAccountModal())
+
+
+class EmailChangePanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label='メールアドレスを変更', style=discord.ButtonStyle.primary,
+                       emoji='📧', custom_id='ywp:email_change:open')
+    async def change_email(self, interaction: discord.Interaction,
+                           button: discord.ui.Button):
+        if interaction.user.id in ACCOUNT_RUNNING:
+            return await interaction.response.send_message(
+                '⏳ アカウント作成またはメール変更が実行中です。完了までお待ちください。',
+                ephemeral=True)
+        await interaction.response.send_modal(EmailChangeModal())
+
+
 class CoinTargetAccountModal(discord.ui.Modal, title='SSS極ツチノコ狙い'):
     count = discord.ui.Label(
         text='試行数',
@@ -9025,6 +9055,8 @@ class YWPBot(commands.Bot):
     async def setup_hook(self):
         # 再起動後もパネル/中止ボタンが動くように永続Viewを登録
         self.add_view(PanelView())
+        self.add_view(StoneAccountPanelView())
+        self.add_view(EmailChangePanelView())
         self.add_view(CancelView())
         self.add_view(HitodamaTestView())
         self.add_view(AgedAccountView())
@@ -9270,6 +9302,57 @@ async def setup_aged_panel(interaction: discord.Interaction):
         return await interaction.response.send_message(
             '❌ このチャンネルに送信する権限がありません。', ephemeral=True)
     await interaction.response.send_message('✅ 久垢作成パネルを設置しました。', ephemeral=True)
+
+
+@bot.tree.command(name='石垢作成設置',
+                  description='石垢作成専用パネルをこのチャンネルに設置します')
+async def setup_stone_account_panel(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        return await interaction.response.send_message(ADMIN_ONLY_MSG, ephemeral=True)
+    channel = interaction.channel
+    if channel is None or not isinstance(channel, discord.abc.Messageable):
+        return await interaction.response.send_message(
+            '❌ このチャンネルには設置できません。', ephemeral=True)
+    embed = discord.Embed(
+        title='🔷 石垢作成',
+        description=(
+            '作成数と目標Yポイントを指定して石垢を作成します。\n'
+            'イベント通常面から進行し、続けてボス面を周回します。\n'
+            '種族制限に合わせて編成し、作成結果はDMでお知らせします。'
+        ),
+        color=COLOR_OK,
+    )
+    try:
+        await channel.send(embed=embed, view=StoneAccountPanelView())
+    except discord.Forbidden:
+        return await interaction.response.send_message(
+            '❌ このチャンネルに送信する権限がありません。', ephemeral=True)
+    await interaction.response.send_message('✅ 石垢作成パネルを設置しました。', ephemeral=True)
+
+
+@bot.tree.command(name='メールアドレス変更設置',
+                  description='メールアドレス変更専用パネルをこのチャンネルに設置します')
+async def setup_email_change_panel(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        return await interaction.response.send_message(ADMIN_ONLY_MSG, ephemeral=True)
+    channel = interaction.channel
+    if channel is None or not isinstance(channel, discord.abc.Messageable):
+        return await interaction.response.send_message(
+            '❌ このチャンネルには設置できません。', ephemeral=True)
+    embed = discord.Embed(
+        title='📧 メールアドレス変更',
+        description=(
+            'LEVEL5 IDに登録中のメールアドレスとパスワードを入力して変更を申請します。\n'
+            '確認リンクはDMでお送りします。パスワードは申請時のみ使用し、保存しません。'
+        ),
+        color=COLOR_OK,
+    )
+    try:
+        await channel.send(embed=embed, view=EmailChangePanelView())
+    except discord.Forbidden:
+        return await interaction.response.send_message(
+            '❌ このチャンネルに送信する権限がありません。', ephemeral=True)
+    await interaction.response.send_message('✅ メールアドレス変更パネルを設置しました。', ephemeral=True)
 
 
 @bot.tree.command(name='回し放題垢作成設置',
