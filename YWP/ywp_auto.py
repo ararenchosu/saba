@@ -1191,6 +1191,10 @@ def link_email(udkey, email, pw, timeout=25, proxy=None):
     return fin
 
 
+class ManualEmailChangeRequired(RuntimeError):
+    """LEVEL5 IDにログインできたが、変更フォームを自動特定できない"""
+
+
 def change_level5_email(email, password, new_email, timeout=25, proxy=None):
     """LEVEL5 ID公式サイトのログイン後フォームからメール変更を申請する"""
     auth_origin = 'https://auth.level5-id.com'
@@ -1264,9 +1268,12 @@ def change_level5_email(email, password, new_email, timeout=25, proxy=None):
     if account_link is None:
         for _, href in anchors(response.text):
             path = urlparse(urljoin(response.url, href)).path.lower()
-            if 'account' in path and ('info' in path or 'edit' in path):
+            if (('account' in path and ('info' in path or 'edit' in path))
+                    or ('user_info' in path and 'modification' in path)):
                 account_link = safe_url(response.url, href)
                 break
+    if account_link is None:
+        account_link = safe_url(response.url, '/user_info_modification?locale=ja')
 
     if account_link:
         response = session.get(account_link, allow_redirects=True, timeout=timeout)
@@ -1285,7 +1292,7 @@ def change_level5_email(email, password, new_email, timeout=25, proxy=None):
             change_form = next(
                 (form for form in forms if is_change_form(response.url, form)), None)
     if change_form is None:
-        raise RuntimeError('メールアドレス変更フォームが見つかりませんでした')
+        raise ManualEmailChangeRequired('メールアドレス変更フォームが見つかりませんでした')
 
     payload = dict(change_form['inputs'])
     editable_email_keys = [
@@ -1293,7 +1300,7 @@ def change_level5_email(email, password, new_email, timeout=25, proxy=None):
         if not any(word in key.lower() for word in ('current', 'old', 'before'))
     ]
     if not editable_email_keys:
-        raise RuntimeError('変更先メールアドレスの入力欄を特定できませんでした')
+        raise ManualEmailChangeRequired('変更先メールアドレスの入力欄を特定できませんでした')
     for key in editable_email_keys:
         payload[key] = new_email
     for key in password_keys(change_form):

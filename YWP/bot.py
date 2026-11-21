@@ -156,6 +156,7 @@ MAIL_TM_API_URL = 'https://api.mail.tm'
 
 PASSWORD_LEN = 10                # 自動生成パスワードの文字数
 MAIL_WAIT_TIMEOUT = 120.0        # 登録メールを待つ最大秒数
+EMAIL_CHANGE_MANUAL_TIMEOUT = 15 * 60
 MAIL_POLL_INTERVAL = 5.0         # メールボックスの再確認間隔（秒）
 MAX_CONCURRENT_ACCOUNTS = 2      # 同時に作成できるアカウント数の上限
 MAX_CONCURRENT_COIN_TARGET_ACCOUNTS = 5
@@ -1625,9 +1626,10 @@ async def wait_verification_email(mailbox: MailTmMailbox) -> str | None:
         await asyncio.sleep(MAIL_POLL_INTERVAL)
 
 
-async def wait_email_change_link(mailbox: MailTmMailbox) -> str | None:
+async def wait_email_change_link(mailbox: MailTmMailbox,
+                                 timeout: float = MAIL_WAIT_TIMEOUT) -> str | None:
     """LEVEL5 IDからのメール変更確認リンクをMail.tmで待つ"""
-    deadline = time.time() + MAIL_WAIT_TIMEOUT
+    deadline = time.time() + timeout
     while True:
         try:
             items = await mailbox.check_email()
@@ -1700,13 +1702,28 @@ async def start_level5_email_change(interaction: discord.Interaction,
             mailbox = MailTmMailbox(session)
             new_email = await mailbox.create_address()
             await update_status('LEVEL5 IDへログインしてメール変更を申請しています...')
-            await asyncio.to_thread(
-                ywp_auto.change_level5_email,
-                current_email.strip(), password, new_email,
-                proxy=lease.url if lease is not None else None)
-            await update_status(
-                f'変更確認メールを待っています（最大 {int(MAIL_WAIT_TIMEOUT)} 秒）...')
-            link = await wait_email_change_link(mailbox)
+            try:
+                await asyncio.to_thread(
+                    ywp_auto.change_level5_email,
+                    current_email.strip(), password, new_email,
+                    proxy=lease.url if lease is not None else None)
+            except ywp_auto.ManualEmailChangeRequired:
+                manual_instructions = (
+                    '自動入力できなかったため、手動で変更してください。\n'
+                    '1. LEVEL5 IDのアカウント情報変更画面を開く:\n'
+                    'https://auth.level5-id.com/user_info_modification?locale=ja\n'
+                    '2. 現在のLEVEL5 IDでログインし、変更先に次のアドレスを入力して申請\n'
+                    f'`{new_email}`\n'
+                    f'申請後、確認メールを最大 {EMAIL_CHANGE_MANUAL_TIMEOUT // 60} 分待ち、'
+                    '届いた確認リンクをDMします。')
+                if not await update_status(manual_instructions):
+                    await interaction.followup.send(manual_instructions, ephemeral=True)
+                link = await wait_email_change_link(
+                    mailbox, timeout=EMAIL_CHANGE_MANUAL_TIMEOUT)
+            else:
+                await update_status(
+                    f'変更確認メールを待っています（最大 {int(MAIL_WAIT_TIMEOUT)} 秒）...')
+                link = await wait_email_change_link(mailbox)
             if link is None:
                 raise RuntimeError('確認メールが届きませんでした。新しいメールアドレスが受け付けられたか確認してください')
 
