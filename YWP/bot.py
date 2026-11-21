@@ -13,6 +13,7 @@
 
 import asyncio
 import collections
+import difflib
 import io
 import json
 import math
@@ -145,6 +146,8 @@ FARM_DASHBOARD_RESEND_PENDING: set[int] = set()
 FARM_DASHBOARD_RESEND_DONE: set[int] = set()
 # user_id -> {'udkey','userId','name','at'}  ※ディスクには書かない。再起動で消える
 SESSIONS: dict[int, dict] = {}
+YOKODORI_SNAPSHOTS: dict[int, dict] = {}
+YOKODORI_CAPTURING: set[int] = set()
 SEM = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 
 # --- アカウント自動作成（旧 main.py 由来） ---
@@ -9742,6 +9745,98 @@ async def stage_list(interaction: discord.Interaction, keyword: str = '',
         await send_stage_list(interaction, c, keyword, show_all, include_master)
     finally:
         proxy_pool.release_client(c)
+
+
+YOKODORI_TABLES = ('ywp_user_event', 'ywp_user_event_condition', 'ywp_user_treasure')
+
+
+def yokodori_snapshot(save):
+    result = {}
+    for table in YOKODORI_TABLES:
+        if table not in save or save[table] is None:
+            result[table] = None
+            continue
+        data = rows(save[table])
+        if not isinstance(data, list) or not all(isinstance(row, (list, tuple)) for row in data):
+            raise ValueError(f'{table} の形式が不正です')
+        result[table] = sorted(json.dumps(row, ensure_ascii=False) for row in data)
+    if all(value is None for value in result.values()):
+        raise ValueError('比較対象のイベントデータがありません')
+    return result
+
+
+def yokodori_diff(off, on):
+    result = []
+    for table in YOKODORI_TABLES:
+        result.append(f'=== {table} ===')
+        if off[table] is None or on[table] is None:
+            result.append('比較不可: 一方または両方にテーブルがありません')
+            continue
+        diff = list(difflib.unified_diff(off[table], on[table],
+                                         fromfile='off', tofile='on', lineterm=''))
+        result.extend(diff or ['差分なし'])
+    return '\n'.join(result) + '\n'
+
+
+@bot.tree.command(name='横取り比較', description='ログイン中の2アカウントのイベント状態を比較します')
+@app_commands.choices(mode=[
+    app_commands.Choice(name='横取りオフ', value='off'),
+    app_commands.Choice(name='横取りオン', value='on'),
+])
+async def yokodori_compare(interaction: discord.Interaction, mode: app_commands.Choice[str]):
+    owner = interaction.user.id
+    if owner in YOKODORI_CAPTURING:
+        return await interaction.response.send_message('⚠ 比較データを取得中です。', ephemeral=True)
+    if owner not in SESSIONS:
+        return await interaction.response.send_message(
+            '⚠ パネルの「ステージ一覧」から対象アカウントにログインしてください。', ephemeral=True)
+    YOKODORI_CAPTURING.add(owner)
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        c = await acquire_client(owner)
+        if c is None:
+            return await interaction.followup.send(
+                '⚠ ログイン情報が期限切れです。ステージ一覧からログインし直してください。', ephemeral=True)
+        try:
+            snapshot = yokodori_snapshot(c.save)
+            account_id = str(c.userId) if c.userId is not None else ''
+            if not account_id:
+                raise ValueError('ログインしたセーブを特定できません')
+        except (ValueError, TypeError, json.JSONDecodeError) as e:
+            return await interaction.followup.send(f'❌ イベントデータ取得失敗: {e}', ephemeral=True)
+        finally:
+            proxy_pool.release_client(c)
+
+        previous = YOKODORI_SNAPSHOTS.get(owner)
+        if previous and previous['mode'] != mode.value:
+            if previous['account_id'] == account_id:
+                return await interaction.followup.send(
+                    '⚠ 同じセーブです。もう一方のアカウントでログインしてください。', ephemeral=True)
+            off, on = ((previous['data'], snapshot) if previous['mode'] == 'off'
+                       else (snapshot, previous['data']))
+            report = yokodori_diff(off, on).encode('utf-8')
+            if len(report) > 8 * 1024 * 1024:
+                return await interaction.followup.send('❌ 差分が大きすぎて送信できません。', ephemeral=True)
+            await interaction.followup.send(
+                '比較結果です。差分は進行度などによる可能性もあり、横取り設定とは限りません。'
+                '共有前に個人情報を確認してください。',
+                file=discord.File(io.BytesIO(report), filename='yokodori-diff.txt'), ephemeral=True)
+            YOKODORI_SNAPSHOTS.pop(owner, None)
+            return
+
+        entry = {'mode': mode.value, 'account_id': account_id, 'data': snapshot}
+        YOKODORI_SNAPSHOTS[owner] = entry
+
+        def expire():
+            if YOKODORI_SNAPSHOTS.get(owner) is entry:
+                YOKODORI_SNAPSHOTS.pop(owner, None)
+
+        asyncio.get_running_loop().call_later(900, expire)
+        await interaction.followup.send(
+            '✅ 取得しました。15分以内にもう一方のアカウントでステージ一覧からログインし、'
+            '反対のモードを選んで `/横取り比較` を実行してください。', ephemeral=True)
+    finally:
+        YOKODORI_CAPTURING.discard(owner)
 
 
 @bot.tree.command(name='ログアウト', description='Botが保持しているログイン情報を消去します')
