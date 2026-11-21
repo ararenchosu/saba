@@ -3369,6 +3369,7 @@ def progress_embed(job: FarmJob) -> discord.Embed:
     )
     e.add_field(name='状態', value=job.status, inline=True)
     e.add_field(name='ステージ', value=job.stage_display(), inline=True)
+    e.add_field(name='🔑 鍵の状況', value=key_status_text(job), inline=False)
     e.add_field(name='経過', value=fmt_sec(job.elapsed), inline=True)
     add_wallet_fields(e, job)
     e.add_field(name='✅ 成功', value=f'{job.success}回', inline=True)
@@ -3430,6 +3431,7 @@ def result_embed(job: FarmJob, aborted: bool = False) -> discord.Embed:
         timestamp=datetime.now(),
     )
     e.add_field(name='ステージ', value=job.stage_display(), inline=True)
+    e.add_field(name='🔑 鍵の状況', value=key_status_text(job), inline=False)
     e.add_field(name='✅ 成功', value=f'{job.success}回', inline=True)
     e.add_field(name='❌ 失敗', value=f'{job.fail}回', inline=True)
     add_wallet_fields(e, job)
@@ -3759,6 +3761,15 @@ def youkai_label(yid) -> str:
 
 ITEM_MASTER_FILE = os.path.join(BASE_DIR, 'data', 'ywp_mst_item.txt')
 _ITEM_NAMES: dict[str, str] | None = None
+KEY_ITEM_MIN = 21359011
+KEY_ITEM_MAX = 21359098
+KEY_ITEM_LIMIT = 30000
+KEY_COLORS = {1: '赤', 2: '黄', 3: '橙', 4: '桃',
+              5: '緑', 6: '青', 7: '紫', 8: '水'}
+KEY_ITEM_IDS = tuple(
+    item_id for item_id in range(KEY_ITEM_MIN, KEY_ITEM_MAX + 1)
+    if 1 <= (item_id // 10) % 10 <= 9 and item_id % 10 in KEY_COLORS
+)
 
 
 def item_label(item_id) -> str:
@@ -3772,7 +3783,35 @@ def item_label(item_id) -> str:
                     _ITEM_NAMES.setdefault(m.group(1), m.group(2).strip())
         except OSError as e:
             print(f'[item] アイテムマスタを読めません（IDで表示します）: {e}')
+    try:
+        numeric_id = int(item_id)
+    except (TypeError, ValueError):
+        numeric_id = None
+    if numeric_id is not None and KEY_ITEM_MIN <= numeric_id <= KEY_ITEM_MAX:
+        number = (numeric_id // 10) % 10
+        color = numeric_id % 10
+        if number >= 1 and color in KEY_COLORS:
+            return f'第{number}の鍵（{KEY_COLORS[color]}）'
     return _ITEM_NAMES.get(str(item_id)) or f'`{item_id}`'
+
+
+def key_status_text(job: FarmJob) -> str:
+    inventory = job.item_prev or job.current_items or {}
+    stage_id = job.stage_id
+    stage_no = stage_id % 1000 if stage_id >= 1_000_000 else None
+    if stage_no not in range(1, 10):
+        return '現在の面の鍵情報を判定できません'
+
+    lines = [f'現在：{stage_no}面']
+    for item_id in KEY_ITEM_IDS:
+        number = (item_id // 10) % 10
+        if number != stage_no:
+            continue
+        color = item_id % 10
+        count = inventory.get(str(item_id), inventory.get(item_id, 0))
+        state = '埋まり' if count >= KEY_ITEM_LIMIT else f'{count:,}/{KEY_ITEM_LIMIT:,}'
+        lines.append(f'・{number}面・第{number}の鍵（{KEY_COLORS[color]}）：`{state}`')
+    return '\n'.join(lines)
 
 
 SECRET_BOOK_IDS = (29002, 29003, 20703, 29001, 29004, 29100, 28001)
@@ -3791,7 +3830,7 @@ def inventory_group_text(inventory: dict, item_ids: tuple[int, ...]) -> str:
 def tracked_inventory(inventory: dict[str, int]) -> dict[str, int]:
     return {
         str(item_id): inventory.get(str(item_id), 0)
-        for item_id in (*SECRET_BOOK_IDS, *EXP_ORB_IDS)
+        for item_id in (*SECRET_BOOK_IDS, *EXP_ORB_IDS, *KEY_ITEM_IDS)
     }
 
 
@@ -3826,14 +3865,40 @@ def on_items(job: FarmJob, c: Client, result: dict) -> bool:
     previous_tracked = tracked_inventory(job.current_items or job.item_prev)
     current_tracked = tracked_inventory(now)
     inventory_changed = current_tracked != previous_tracked
+    key_gains = {}
     for k, n in now.items():
         gain = n - job.item_prev.get(k, 0)
         if gain > 0:
             job.item_counts[k] += gain
+            try:
+                item_id = int(k)
+            except (TypeError, ValueError):
+                continue
+            if KEY_ITEM_MIN <= item_id <= KEY_ITEM_MAX:
+                key_gains[k] = gain
     job.item_prev = now
     if inventory_changed:
         job.current_items = current_tracked
         job.inventory_version += 1
+    if key_gains:
+        gain_lines = []
+        for item_id in range(KEY_ITEM_MIN, KEY_ITEM_MAX + 1):
+            number = (item_id // 10) % 10
+            color = item_id % 10
+            if not (1 <= number <= 9 and color in KEY_COLORS):
+                continue
+            count = now.get(str(item_id), now.get(item_id, 0))
+            gain = key_gains.get(str(item_id), 0)
+            if gain <= 0:
+                continue
+            state = '埋まり' if count >= KEY_ITEM_LIMIT else f'{count:,}/{KEY_ITEM_LIMIT:,}'
+            gain_lines.append(
+                f'{number}面・第{number}の鍵（{KEY_COLORS[color]}）'
+                f'×{gain} 所持:{state}'
+            )
+        if gain_lines:
+            log_line(f'鍵ドロップ取得: #{job.jid} stage={job.stage_id} ' +
+                     ' / '.join(gain_lines))
     return inventory_changed
 
 
