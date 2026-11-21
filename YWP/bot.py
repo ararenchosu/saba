@@ -13,7 +13,6 @@
 
 import asyncio
 import collections
-import html
 import io
 import json
 import math
@@ -26,7 +25,6 @@ import time
 import traceback
 import unicodedata
 from datetime import datetime, timedelta
-from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -153,10 +151,11 @@ SEM = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 L5_REG_URL = 'https://auth.level5-id.com/user_registration?locale=ja'
 L5_VERIFY_SUBJECT = '［LEVEL5 ID］アカウント新規登録用URL送付のお知らせ'
 MAIL_TM_API_URL = 'https://api.mail.tm'
+MAIL_TM_WEB_URL = 'https://mail.tm'
+L5_EMAIL_CHANGE_URL = 'https://auth.level5-id.com/user_info_modification?locale=ja'
 
 PASSWORD_LEN = 10                # 自動生成パスワードの文字数
 MAIL_WAIT_TIMEOUT = 120.0        # 登録メールを待つ最大秒数
-EMAIL_CHANGE_WAIT_TIMEOUT = 5 * 60
 MAIL_POLL_INTERVAL = 5.0         # メールボックスの再確認間隔（秒）
 MAX_CONCURRENT_ACCOUNTS = 2      # 同時に作成できるアカウント数の上限
 MAX_CONCURRENT_COIN_TARGET_ACCOUNTS = 5
@@ -1494,16 +1493,6 @@ class MailTmMailbox:
             raise RuntimeError('Mail.tmから受信トークンを取得できませんでした')
         return self.address
 
-    async def authenticate(self, address: str, password: str) -> None:
-        self.address = address.strip()
-        token_response = await self._request('POST', '/token', payload={
-            'address': self.address,
-            'password': password,
-        })
-        self.token = token_response.get('token')
-        if not self.token:
-            raise RuntimeError('Mail.tmから受信トークンを取得できませんでした')
-
     async def check_email(self) -> list:
         data = await self._request('GET', '/messages', authenticated=True)
         return data.get('hydra:member') or []
@@ -1658,115 +1647,6 @@ async def wait_verification_email(mailbox: MailTmMailbox) -> str | None:
         if time.time() >= deadline:
             return None
         await asyncio.sleep(MAIL_POLL_INTERVAL)
-
-
-async def wait_email_change_link(mailbox: MailTmMailbox) -> str | None:
-    """LEVEL5 IDからのメール変更確認リンクをMail.tmで待つ"""
-    deadline = time.time() + EMAIL_CHANGE_WAIT_TIMEOUT
-    while True:
-        try:
-            items = await mailbox.check_email()
-        except (aiohttp.ClientError, RuntimeError, asyncio.TimeoutError) as e:
-            print(f'[email-change] メール一覧の取得に失敗: {str(e)[:120]}')
-            items = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            subject = str(item.get('subject') or '')
-            if 'メール' not in subject or '変更' not in subject:
-                continue
-            mail_id = item.get('id')
-            if not mail_id:
-                continue
-            try:
-                body = await mailbox.fetch_body(str(mail_id))
-            except (aiohttp.ClientError, RuntimeError, asyncio.TimeoutError) as e:
-                print(f'[email-change] メール本文の取得に失敗: {str(e)[:120]}')
-                continue
-            for candidate in re.findall(r'https?://[^\s<>"\']+', html.unescape(body)):
-                candidate = candidate.rstrip(').,，。；;')
-                parsed = urlparse(candidate)
-                change_path = parsed.path.lower()
-                if (parsed.scheme == 'https'
-                        and parsed.hostname == 'auth.level5-id.com'
-                        and any(word in change_path
-                                for word in ('verify', 'confirm', 'change', 'email', 'mail'))):
-                    return candidate
-        if time.time() >= deadline:
-            return None
-        await asyncio.sleep(MAIL_POLL_INTERVAL)
-
-
-async def check_manual_email_change(interaction: discord.Interaction,
-                                    mailbox_email: str, mailbox_password: str):
-    """Mail.tmの受信箱を確認し、LEVEL5 IDのメール変更リンクをDMする"""
-    user_id = interaction.user.id
-    if user_id in ACCOUNT_RUNNING:
-        return await interaction.response.send_message(
-            '⏳ アカウント作成またはメール変更が実行中です。完了までお待ちください。',
-            ephemeral=True)
-    ACCOUNT_RUNNING.add(user_id)
-    lease = None
-    status = None
-
-    async def update_status(text: str) -> bool:
-        if status is None:
-            return False
-        try:
-            await status.edit(content=text)
-            return True
-        except discord.HTTPException as e:
-            log_line(f'メール変更進捗の更新に失敗 user={user_id}: {str(e)[:120]}')
-            return False
-
-    try:
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        status = await interaction.followup.send(
-            'Mail.tmの受信箱に接続しています...', ephemeral=True, wait=True)
-        lease = await lease_proxy()
-        connector = None
-        if lease is not None:
-            if ProxyConnector is None:
-                raise RuntimeError('aiohttp_socks が入っていないためプロキシ経由で接続できません')
-            connector = ProxyConnector.from_url(lease.url)
-        async with aiohttp.ClientSession(
-                connector=connector, trust_env=lease is None) as session:
-            mailbox = MailTmMailbox(session)
-            await mailbox.authenticate(mailbox_email, mailbox_password)
-            await update_status(
-                f'{mailbox.address} の確認メールを検索しています'
-                f'（最大 {int(EMAIL_CHANGE_WAIT_TIMEOUT)} 秒）...')
-            link = await wait_email_change_link(mailbox)
-            if link is None:
-                raise RuntimeError(
-                    '確認メールが見つかりませんでした。Mail.tmのアドレスとパスワード、'
-                    'およびLEVEL5 IDで申請した宛先を確認してください')
-
-        message = (f'LEVEL5 IDのメールアドレス変更確認リンクです。\n'
-                   f'受信メールアドレス: `{mailbox_email.strip()}`\n'
-                   f'リンクを開いて変更を完了してください:\n{link}')
-        try:
-            await interaction.user.send(message)
-            await update_status('✅ 確認リンクをDMしました。リンクを開いてメール変更を完了してください。')
-        except discord.HTTPException:
-            await update_status('⚠ DMを送れなかったため、この個人用メッセージに確認リンクを表示します。')
-            await interaction.followup.send(message, ephemeral=True)
-    except Exception as e:
-        log_line(f'LEVEL5メール変更確認に失敗 user={user_id}: {str(e)[:180]}')
-        text = f'❌ メール変更を完了できませんでした: `{str(e)[:220]}`'
-        if await update_status(text):
-            return
-        try:
-            await interaction.followup.send(text, ephemeral=True)
-        except discord.HTTPException as send_error:
-            log_line(f'メール変更エラー通知に失敗 user={user_id}: {str(send_error)[:120]}')
-    finally:
-        mailbox_password = None
-        try:
-            if lease is not None:
-                lease.release()
-        finally:
-            ACCOUNT_RUNNING.discard(user_id)
 
 
 async def create_level5_account(progress, password: str | None = None,
@@ -2478,6 +2358,7 @@ def account_result_embed(rec: AccountRecord, index: int = 1, total: int = 1,
         name='ℹ 補足',
         value='・パスワードはスポイラーで隠してあります（タップで表示）\n'
               '・同じ内容をDMにも送っています\n'
+              '・作成時のメールアドレスとパスワードはMail.tmとLEVEL5 IDで共通です\n'
               '・メール受信: [Mail.tm](https://mail.tm)',
         inline=False,
     )
@@ -2490,6 +2371,7 @@ def accounts_txt(records: list[AccountRecord], started_at: datetime,
     head = [
         f'ぷにぷに {kind} 作成結果',
         'メール受信: https://mail.tm',
+        '作成時のメールアドレス・パスワードはMail.tmとLEVEL5 IDで共通です',
         f'{fmt_jp_datetime(started_at)} から {fmt_jp_datetime(finished_at)} '
         f'までに作られた垢',
         f'作成数: {len(records)}件' + (f'（ほかに失敗 {ng}件）' if ng else ''),
@@ -6906,7 +6788,6 @@ class StoneAccountModal(discord.ui.Modal, title='石垢作成'):
                 f'❌ 目標Yポイントは 1〜{WALLET_CAPS["ypoint"]:,} で指定してください。',
                 ephemeral=True)
         password = self.password.component.value
-        self.password.component.value = ''
         await start_stone_account_job(
             interaction, count, target, password, self.name.component.value)
 
@@ -6956,33 +6837,46 @@ class AccountModeView(discord.ui.View):
         await interaction.response.send_modal(StoneAccountModal())
 
 
-class EmailChangeModal(discord.ui.Modal, title='Mail.tmの受信箱を確認'):
-    email = discord.ui.Label(
-        text='Mail.tmのメールアドレス',
-        component=discord.ui.TextInput(placeholder='変更申請先のMail.tmアドレス',
-                                       max_length=120),
-    )
-    password = discord.ui.Label(
-        text='Mail.tmのパスワード',
-        description='受信確認にだけ使用し、保存・ログ出力しません',
-        component=discord.ui.TextInput(placeholder='Mail.tmアカウントのパスワード',
-                                       max_length=100),
+def email_change_instructions_embed() -> discord.Embed:
+    return discord.Embed(
+        title='📧 メールアドレス変更の手順',
+        description=(
+            '1. **LEVEL5 IDで変更申請**を開き、現在のLEVEL5 IDでログインします。\n'
+            '2. アカウント情報確認／変更から、新しく使いたいメールアドレスを指定し、'
+            '画面の案内に従って変更を申請します。\n'
+            '3. 公式画面の案内に従い、確認メールが届く受信箱を確認して、'
+            'メール内の手順で変更を完了します。必要に応じて変更前と変更先の受信箱を確認してください。\n'
+            '4. 変更前がMail.tmの場合は **Mail.tmにログイン** から受信箱を開けます。'
+            '変更先が別のメールサービスなら、そのサービスの受信箱を確認してください。\n\n'
+            'Botで新しく作成したアカウントは、作成時のメールアドレスとパスワードが'
+            'Mail.tmとLEVEL5 IDで共通です。以前作成したアカウントでは異なる場合があります。\n'
+            '⚠️ パスワードは各公式サイトにだけ入力し、Discordには送信しないでください。'
+        ),
+        color=COLOR_INFO,
     )
 
-    async def on_submit(self, interaction: discord.Interaction):
-        email = self.email.component.value.strip()
-        password = self.password.component.value
-        self.password.component.value = ''
-        if '@' not in email or any(char.isspace() for char in email):
-            return await interaction.response.send_message(
-                '❌ Mail.tmのメールアドレス形式を確認してください。', ephemeral=True)
-        try:
-            await check_manual_email_change(interaction, email, password)
-        finally:
-            password = None
 
-    async def on_error(self, interaction: discord.Interaction, error: Exception):
-        await report_error(interaction, error, 'EmailChangeModal')
+class EmailChangeInstructionsView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(
+            label='LEVEL5 IDで変更申請',
+            style=discord.ButtonStyle.link,
+            url=L5_EMAIL_CHANGE_URL,
+        ))
+        self.add_item(discord.ui.Button(
+            label='Mail.tmにログイン',
+            style=discord.ButtonStyle.link,
+            url=MAIL_TM_WEB_URL,
+        ))
+
+
+async def show_email_change_instructions(interaction: discord.Interaction, *, ephemeral: bool = True):
+    await interaction.response.send_message(
+        embed=email_change_instructions_embed(),
+        view=EmailChangeInstructionsView(),
+        ephemeral=ephemeral,
+    )
 
 
 class StoneAccountPanelView(discord.ui.View):
@@ -7000,15 +6894,11 @@ class EmailChangePanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label='申請しました', style=discord.ButtonStyle.primary,
+    @discord.ui.button(label='変更手順を表示', style=discord.ButtonStyle.primary,
                        emoji='📧', custom_id='ywp:email_change:open')
     async def change_email(self, interaction: discord.Interaction,
                            button: discord.ui.Button):
-        if interaction.user.id in ACCOUNT_RUNNING:
-            return await interaction.response.send_message(
-                '⏳ アカウント作成またはメール変更が実行中です。完了までお待ちください。',
-                ephemeral=True)
-        await interaction.response.send_modal(EmailChangeModal())
+        await show_email_change_instructions(interaction)
 
 
 class CoinTargetAccountModal(discord.ui.Modal, title='SSS極ツチノコ狙い'):
@@ -8406,15 +8296,11 @@ class PanelView(discord.ui.View):
             '作成するアカウントの種類を選んでください。',
             view=AccountModeView(interaction.user.id), ephemeral=True)
 
-    @discord.ui.button(label='申請後のメールを確認', style=discord.ButtonStyle.secondary,
+    @discord.ui.button(label='メールアドレス変更の手順', style=discord.ButtonStyle.secondary,
                        emoji='📧', custom_id='ywp:email_change')
     async def email_change(self, interaction: discord.Interaction,
                            button: discord.ui.Button):
-        if interaction.user.id in ACCOUNT_RUNNING:
-            return await interaction.response.send_message(
-                '⏳ アカウント作成またはメール変更が実行中です。完了までお待ちください。',
-                ephemeral=True)
-        await interaction.response.send_modal(EmailChangeModal())
+        await show_email_change_instructions(interaction)
 
     @discord.ui.button(label='前回の条件で再周回', style=discord.ButtonStyle.secondary,
                        emoji='🔁', custom_id='ywp:repeat')
@@ -8911,8 +8797,8 @@ def panel_embed() -> discord.Embed:
             '制限に合わせて編成\n'
             '↳ 指定数の完了後、メールアドレス・パスワード・最終Yポイントを.txtでDM\n'
             '↳ 進捗は `/石垢進捗` で確認。同じ目標Yポイントは同時に1ジョブまで\n'
-            '📧 **メールアドレス変更**: LEVEL5 IDで手動申請後、確認メールをDM\n'
-            '↳ 申請後に「申請しました」を押し、Mail.tmの受信情報を入力\n'
+            '📧 **メールアドレス変更**: ボタンまたは `/メアド変更手順` から手順を確認\n'
+            '↳ 確認メール内のリンクを開いて変更を完了（パスワードをBotに入力する必要なし）\n'
             f'🕰 **久垢作成**: ステージ`{AGED_STAGE_ID}`クリア済みのアカウントは '
             '`/久垢作成設置` のパネルから作成\n\n'
             '💡 ステージIDが不明なら **📋 ステージ一覧** を確認\n'
@@ -9636,10 +9522,8 @@ async def setup_email_change_panel(interaction: discord.Interaction):
     embed = discord.Embed(
         title='📧 メールアドレス変更',
         description=(
-            '1. LEVEL5 IDのアカウント情報変更ページで、Mail.tm宛てに変更申請します。\n'
-            'https://auth.level5-id.com/user_info_modification?locale=ja\n'
-            '2. 申請後に「申請しました」を押し、Mail.tmのアドレスとパスワードを入力します。\n'
-            'Botが確認メールを探し、リンクをDMします。Mail.tmのパスワードは保存しません。'
+            '「変更手順を表示」を押すと、LEVEL5 IDの申請ページとMail.tmへのリンク付き手順が表示されます。\n'
+            'Mail.tmの受信箱はご自身で確認してください。ログイン情報をBotに渡す必要はありません。'
         ),
         color=COLOR_OK,
     )
@@ -9649,6 +9533,12 @@ async def setup_email_change_panel(interaction: discord.Interaction):
         return await interaction.response.send_message(
             '❌ このチャンネルに送信する権限がありません。', ephemeral=True)
     await interaction.response.send_message('✅ メールアドレス変更パネルを設置しました。', ephemeral=True)
+
+
+@bot.tree.command(name='メアド変更手順',
+                  description='LEVEL5 IDのメールアドレス変更手順を表示します')
+async def email_change_instructions(interaction: discord.Interaction):
+    await show_email_change_instructions(interaction, ephemeral=False)
 
 
 @bot.tree.command(name='回し放題垢作成設置',
