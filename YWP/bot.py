@@ -19,6 +19,7 @@ import math
 import os
 import random
 import re
+import secrets
 import string
 import time
 import traceback
@@ -149,7 +150,7 @@ SEM = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 # --- アカウント自動作成（旧 main.py 由来） ---
 L5_REG_URL = 'https://auth.level5-id.com/user_registration?locale=ja'
 L5_VERIFY_SUBJECT = '［LEVEL5 ID］アカウント新規登録用URL送付のお知らせ'
-GM_API_URL = 'https://api.guerrillamail.com/ajax.php'
+MAIL_TM_API_URL = 'https://api.mail.tm'
 
 PASSWORD_LEN = 10                # 自動生成パスワードの文字数
 MAIL_WAIT_TIMEOUT = 120.0        # 登録メールを待つ最大秒数
@@ -1431,50 +1432,79 @@ async def send_master_stage_list(interaction: discord.Interaction, c: Client,
 # アカウント自動作成（旧 main.py 由来）
 # ============================================================================
 
-class GuerrillaMail:
-    """GuerrillaMail 公式APIの最小ラッパー（非同期・aiohttp版）
-
-    旧 main.py が使っていた guerrillamail ライブラリは現在入手できないため、
-    同じ公式API (api.guerrillamail.com/ajax.php) を直接叩いて同等のことをする。
-    """
+class MailTmMailbox:
+    """Mail.tm公式APIで一時メールボックスを作成し、受信メールを読む"""
 
     def __init__(self, session: aiohttp.ClientSession):
         self.session = session
-        self.sid_token: str | None = None
         self.address: str | None = None
+        self.password: str | None = None
+        self.token: str | None = None
 
-    async def _call(self, func: str, **params) -> dict:
-        params['f'] = func
-        params.setdefault('ip', '127.0.0.1')
-        params.setdefault('agent', 'guerrillamail-api-client')
-        if self.sid_token:
-            params.setdefault('sid_token', self.sid_token)
-        async with self.session.get(GM_API_URL, params=params) as r:
-            data = await r.json(content_type=None)
+    async def _request(self, method: str, path: str, *, payload: dict | None = None,
+                       authenticated: bool = False) -> dict:
+        headers = {}
+        if authenticated:
+            if not self.token:
+                raise RuntimeError('Mail.tmの認証トークンがありません')
+            headers['Authorization'] = f'Bearer {self.token}'
+        async with self.session.request(
+                method, f'{MAIL_TM_API_URL}{path}', json=payload, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15)) as response:
+            status = response.status
+            try:
+                data = await response.json(content_type=None)
+            except (aiohttp.ContentTypeError, json.JSONDecodeError) as e:
+                raise RuntimeError(f'Mail.tm APIの応答をJSONとして読めません (HTTP {status})') from e
+        if status < 200 or status >= 300:
+            detail = (data.get('detail') or data.get('hydra:description')
+                      or data.get('message') or '詳細なし') if isinstance(data, dict) else '詳細なし'
+            raise RuntimeError(f'Mail.tm APIエラー (HTTP {status}): {str(detail)[:160]}')
         if not isinstance(data, dict):
-            raise RuntimeError(f'GuerrillaMail API の応答が不正です (status={r.status})')
-        tok = data.get('sid_token')
-        if tok:
-            self.sid_token = tok
+            raise RuntimeError(f'Mail.tm APIの応答形式が不正です (HTTP {status})')
         return data
 
     async def create_address(self) -> str:
-        """新しい捨てメールアドレスを取得する"""
-        data = await self._call('get_email_address')
-        self.address = (data.get('email_addr') or '').strip()
-        if not self.address:
-            raise RuntimeError('捨てメールアドレスを取得できませんでした')
+        domains_response = await self._request('GET', '/domains')
+        domains = domains_response.get('hydra:member') or []
+        available = [
+            d['domain'] for d in domains
+            if isinstance(d, dict) and d.get('isActive') and not d.get('isPrivate')
+            and isinstance(d.get('domain'), str)
+        ]
+        if not available:
+            raise RuntimeError('Mail.tmで利用できる公開ドメインがありません')
+
+        domain = random.choice(available)
+        self.address = f'ywp{secrets.token_hex(8)}@{domain}'
+        self.password = secrets.token_hex(24)
+        await self._request('POST', '/accounts', payload={
+            'address': self.address,
+            'password': self.password,
+        })
+        token_response = await self._request('POST', '/token', payload={
+            'address': self.address,
+            'password': self.password,
+        })
+        self.token = token_response.get('token')
+        if not self.token:
+            raise RuntimeError('Mail.tmから受信トークンを取得できませんでした')
         return self.address
 
     async def check_email(self) -> list:
-        """受信箱の一覧を取得する"""
-        data = await self._call('check_email', seq=0)
-        return data.get('list') or []
+        data = await self._request('GET', '/messages', authenticated=True)
+        return data.get('hydra:member') or []
 
-    async def fetch_body(self, mail_id) -> str:
-        """指定したメールの本文を取得する"""
-        data = await self._call('fetch_email', email_id=str(mail_id))
-        return data.get('mail_body') or ''
+    async def fetch_body(self, mail_id: str) -> str:
+        data = await self._request(
+            'GET', f'/messages/{mail_id}', authenticated=True)
+        text = data.get('text')
+        if isinstance(text, str) and text:
+            return text
+        html = data.get('html')
+        if isinstance(html, list):
+            return '\n'.join(part for part in html if isinstance(part, str))
+        return html if isinstance(html, str) else ''
 
 
 def generate_password(length: int = PASSWORD_LEN) -> str:
@@ -1559,27 +1589,28 @@ async def fetch_auth_token(session: aiohttp.ClientSession, url: str,
     return find_auth_token(html)
 
 
-async def wait_verification_email(gm: GuerrillaMail) -> str | None:
+async def wait_verification_email(mailbox: MailTmMailbox) -> str | None:
     """LEVEL5からの登録メール本文を待つ。規定時間内に届かなければNone"""
     await asyncio.sleep(10)   # 届くまで少し待つ（旧 main.py と同じ初回待ち）
     deadline = time.time() + MAIL_WAIT_TIMEOUT
     while True:
         try:
-            items = await gm.check_email()
-        except Exception as e:
+            items = await mailbox.check_email()
+        except (aiohttp.ClientError, RuntimeError, asyncio.TimeoutError) as e:
             print(f'[account] メール一覧の取得に失敗: {str(e)[:120]}')
             items = []
         for it in items:
             if not isinstance(it, dict):
                 continue
-            if (it.get('mail_subject') or '') != L5_VERIFY_SUBJECT:
+            if (it.get('subject') or '') != L5_VERIFY_SUBJECT:
                 continue
-            mail_id = it.get('mail_id') or it.get('guid')
+            mail_id = it.get('id')
             if not mail_id:
                 continue
             try:
-                body = await gm.fetch_body(mail_id)
-            except Exception:
+                body = await mailbox.fetch_body(str(mail_id))
+            except (aiohttp.ClientError, RuntimeError, asyncio.TimeoutError) as e:
+                print(f'[account] 登録メール本文の取得に失敗: {str(e)[:120]}')
                 continue
             if body:
                 return body
@@ -1592,7 +1623,7 @@ async def create_level5_account(progress, password: str | None = None,
                                 player_name: str | None = None,
                                 proxy: str | None = None) -> AccountRecord:
     """
-    GuerrillaMail の捨てメールで LEVEL5 ID を新規作成し、周回用のセーブデータ
+    Mail.tm の捨てメールで LEVEL5 ID を新規作成し、周回用のセーブデータ
     （ゲーム内ユーザー）まで作って AccountRecord を返す。
     セーブ作成に失敗した場合は save_name / client が None になる。
     progress: await progress('テキスト') で進捗を通知するコールバック
@@ -1613,8 +1644,8 @@ async def create_level5_account(progress, password: str | None = None,
     async with session:
         # --- 捨てメールアドレスを生成 ---
         await progress('📧 捨てメールアドレスを生成中...')
-        gm = GuerrillaMail(session)
-        email = await gm.create_address()
+        mailbox = MailTmMailbox(session)
+        email = await mailbox.create_address()
         print(f'[account] 一時メール: {email}')
 
         # --- 仮登録 ---
@@ -1637,7 +1668,7 @@ async def create_level5_account(progress, password: str | None = None,
         # --- 登録メールの到着を待つ ---
         await progress(
             f'📬 登録メールの到着を待っています...（最大 {int(MAIL_WAIT_TIMEOUT)} 秒）')
-        body = await wait_verification_email(gm)
+        body = await wait_verification_email(mailbox)
         if body is None:
             raise RuntimeError('登録メールが規定時間内に届きませんでした')
 
@@ -2079,7 +2110,8 @@ def account_result_embed(rec: AccountRecord, index: int = 1, total: int = 1,
     e.add_field(
         name='ℹ 補足',
         value='・パスワードはスポイラーで隠してあります（タップで表示）\n'
-              '・同じ内容をDMにも送っています',
+              '・同じ内容をDMにも送っています\n'
+              '・メール受信: [Mail.tm](https://mail.tm)',
         inline=False,
     )
     return e
@@ -2090,6 +2122,7 @@ def accounts_txt(records: list[AccountRecord], started_at: datetime,
     """まとめ作成したときの .txt 本文（1行目に作成時間帯、あとは メアド:パスワード）"""
     head = [
         f'ぷにぷに {kind} 作成結果',
+        'メール受信: https://mail.tm',
         f'{fmt_jp_datetime(started_at)} から {fmt_jp_datetime(finished_at)} '
         f'までに作られた垢',
         f'作成数: {len(records)}件' + (f'（ほかに失敗 {ng}件）' if ng else ''),
@@ -6186,6 +6219,8 @@ class AccountModeView(discord.ui.View):
     def __init__(self, owner_id: int):
         super().__init__(timeout=180)
         self.owner_id = owner_id
+        self.add_item(discord.ui.Button(
+            label='Mail.tm', style=discord.ButtonStyle.link, url='https://mail.tm'))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -7876,6 +7911,8 @@ class AgedAccountView(discord.ui.View):
 
     def __init__(self):
         super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(
+            label='Mail.tm', style=discord.ButtonStyle.link, url='https://mail.tm'))
 
     @discord.ui.button(label='久垢作成', style=discord.ButtonStyle.primary,
                        emoji='🕰', custom_id='ywp:aged')
@@ -7892,6 +7929,8 @@ class VipAccountView(discord.ui.View):
 
     def __init__(self):
         super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(
+            label='Mail.tm', style=discord.ButtonStyle.link, url='https://mail.tm'))
 
     @discord.ui.button(label='初期垢を作って回し放題', style=discord.ButtonStyle.primary,
                        emoji='🆕', custom_id='ywp:vip')
@@ -7916,6 +7955,8 @@ class PaidVipView(discord.ui.View):
 
     def __init__(self):
         super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(
+            label='Mail.tm', style=discord.ButtonStyle.link, url='https://mail.tm'))
 
     @discord.ui.button(label='初期垢を作って回し放題（購入）', style=discord.ButtonStyle.primary,
                        emoji='🆕', custom_id='ywp:vip_paid')
