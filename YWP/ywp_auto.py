@@ -1505,11 +1505,23 @@ class Client:
             raw_item, raw_yk = e.get('lotItemInfoList'), e.get('lotYoukaiInfoList')
             _warn_lot('lotItemInfoList', raw_item)
             _warn_lot('lotYoukaiInfoList', raw_yk)
-            if e.get('lotTreasureFlg') or e.get('lotTreasureInfoList'):
-                # 宝箱の抽選は読んでいない（いつも「宝箱なし」で送る）。出たら記録して調べる
+            lot_treasure = e.get('lotTreasureFlg')
+            treasure_id = int(e.get('dropItemId') or 0)
+            treasure_flg = 0
+            treasure_drop_id = 0
+            key_group = (treasure_id // 10) % 10
+            key_color = treasure_id % 10
+            if (lot_treasure == 1 and 21359011 <= treasure_id <= 21359098
+                    and 1 <= key_group <= 9 and 1 <= key_color <= 8):
+                treasure_flg = 1
+                treasure_drop_id = treasure_id
+                print(f'[ywp] 鍵ドロップ当選を申告: dropTreasureId={treasure_drop_id} '
+                      f'(enemyId={e.get("enemyId")})', flush=True)
+            elif lot_treasure or e.get('lotTreasureInfoList'):
                 log_line(f'宝箱の抽選あり stage={stageId} enemyId={e.get("enemyId")} '
-                         f'lotTreasureFlg={e.get("lotTreasureFlg")!r} '
-                         f'lotTreasure={e.get("lotTreasureInfoList")!r}')
+                         f'lotTreasureFlg={lot_treasure!r} '
+                         f'lotTreasure={e.get("lotTreasureInfoList")!r} '
+                         f'dropItemId={treasure_id}')
             # lotItemInfoList は '|1'=当選のフラグ方式（2026-09-24 観測）。
             # 当選時の dropItemId には、敵データの dropItemId（サーバーが
             # gameStart時点で決めた落下品）をそのまま申告する
@@ -1529,8 +1541,8 @@ class Client:
                 'dropItemCheckKey': item_key,
                 'dropItemFlg': item_flg,
                 'dropItemId': item_id,
-                'dropTreasureFlg': 0,
-                'dropTreasureId': 0,
+                'dropTreasureFlg': treasure_flg,
+                'dropTreasureId': treasure_drop_id,
                 'dropYoukaiCheckKey': yk_key,
                 # dropYoukaiId は元の本文に無いフィールドなので足さない
                 # （知らないキーを増やすと rc=3 で弾かれうる）
