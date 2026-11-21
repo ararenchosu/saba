@@ -9,6 +9,7 @@ import base64
 import contextvars
 import datetime
 import hashlib
+import html
 import json
 import os
 import random
@@ -1188,6 +1189,122 @@ def link_email(udkey, email, pw, timeout=25, proxy=None):
     if not fin.get('result'):
         raise RuntimeError('連携finalize失敗: %s' % fin)
     return fin
+
+
+def change_level5_email(email, password, new_email, timeout=25, proxy=None):
+    """LEVEL5 ID公式サイトのログイン後フォームからメール変更を申請する"""
+    auth_origin = 'https://auth.level5-id.com'
+
+    def safe_url(base, href):
+        url = urljoin(base, href)
+        parsed = urlparse(url)
+        if parsed.scheme != 'https' or parsed.hostname != 'auth.level5-id.com':
+            raise RuntimeError('LEVEL5 IDの画面が想定外のURLへ移動しました')
+        return url
+
+    def anchors(markup):
+        found = []
+        for match in re.finditer(r'<a\b([^>]*)>(.*?)</a>', markup, re.I | re.S):
+            href = re.search(r'href=["\']([^"\']+)["\']', match.group(1), re.I)
+            if href:
+                text = re.sub(r'<[^>]+>', '', match.group(2))
+                found.append((html.unescape(text).strip(), href.group(1)))
+        return found
+
+    def email_keys(form):
+        return [key for key in form['inputs'] if 'email' in key.lower()]
+
+    def password_keys(form):
+        return [key for key in form['inputs'] if 'password' in key.lower()]
+
+    def form_url(page_url, form):
+        return safe_url(page_url, form.get('action') or page_url)
+
+    def is_change_form(page_url, form):
+        if not email_keys(form) or form['inputs'].get('_method', '').lower() == 'delete':
+            return False
+        path = urlparse(form_url(page_url, form)).path.rstrip('/').lower()
+        return path != '/login' and 'delete' not in path
+
+    def check_response(response):
+        if response.status_code >= 400:
+            raise RuntimeError(f'LEVEL5 IDページがHTTP {response.status_code}を返しました')
+
+    session = requests.Session()
+    session.proxies.update(normalize_proxy(proxy) or _proxies())
+    session.headers.update({
+        'User-Agent': UA,
+        'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
+        'Accept-Language': 'ja',
+    })
+    login_url = f'{auth_origin}/login?locale=ja'
+    response = session.get(login_url, timeout=timeout)
+    check_response(response)
+    login_form = next((form for form in _parse_forms(response.text)
+                       if email_keys(form) and password_keys(form)), None)
+    if login_form is None:
+        raise RuntimeError('LEVEL5 IDのログインフォームを取得できませんでした')
+
+    payload = dict(login_form['inputs'])
+    for key in email_keys(login_form):
+        payload[key] = email
+    for key in password_keys(login_form):
+        payload[key] = password
+    response = session.post(form_url(response.url, login_form), data=payload,
+                            allow_redirects=True, timeout=timeout)
+    check_response(response)
+    if urlparse(response.url).path.rstrip('/') == '/login':
+        raise RuntimeError('LEVEL5 IDにログインできませんでした。メールアドレスとパスワードを確認してください')
+
+    account_link = None
+    for text, href in anchors(response.text):
+        if 'アカウント情報' in text and ('確認' in text or '変更' in text):
+            account_link = safe_url(response.url, href)
+            break
+    if account_link is None:
+        for _, href in anchors(response.text):
+            path = urlparse(urljoin(response.url, href)).path.lower()
+            if 'account' in path and ('info' in path or 'edit' in path):
+                account_link = safe_url(response.url, href)
+                break
+
+    if account_link:
+        response = session.get(account_link, allow_redirects=True, timeout=timeout)
+        check_response(response)
+    forms = _parse_forms(response.text)
+    change_form = next((form for form in forms if is_change_form(response.url, form)), None)
+    if change_form is None:
+        email_change_link = next(
+            (safe_url(response.url, href) for text, href in anchors(response.text)
+             if 'メール' in text and '変更' in text),
+            None)
+        if email_change_link:
+            response = session.get(email_change_link, allow_redirects=True, timeout=timeout)
+            check_response(response)
+            forms = _parse_forms(response.text)
+            change_form = next(
+                (form for form in forms if is_change_form(response.url, form)), None)
+    if change_form is None:
+        raise RuntimeError('メールアドレス変更フォームが見つかりませんでした')
+
+    payload = dict(change_form['inputs'])
+    editable_email_keys = [
+        key for key in email_keys(change_form)
+        if not any(word in key.lower() for word in ('current', 'old', 'before'))
+    ]
+    if not editable_email_keys:
+        raise RuntimeError('変更先メールアドレスの入力欄を特定できませんでした')
+    for key in editable_email_keys:
+        payload[key] = new_email
+    for key in password_keys(change_form):
+        payload[key] = password
+
+    response = session.post(form_url(response.url, change_form), data=payload,
+                            allow_redirects=True, timeout=timeout)
+    check_response(response)
+    if urlparse(response.url).path.rstrip('/') == '/login':
+        raise RuntimeError('メール変更申請中にLEVEL5 IDからログアウトされました')
+    return True
 
 def rows(s):
     if isinstance(s, str):

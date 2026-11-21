@@ -13,6 +13,7 @@
 
 import asyncio
 import collections
+import html
 import io
 import json
 import math
@@ -25,6 +26,7 @@ import time
 import traceback
 import unicodedata
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -1561,6 +1563,10 @@ class AccountRecord:
         self.coin_gacha_text: str | None = None
         self.coin_gacha_youkai_ids: set[str] = set()
         self.present_text: str | None = None
+        self.ypoint_target: int | None = None
+        self.final_ypoint: int | None = None
+        self.stone_ok: bool | None = None
+        self.stone_error: str | None = None
 
 
 def find_auth_token(html: str) -> str | None:
@@ -1617,6 +1623,121 @@ async def wait_verification_email(mailbox: MailTmMailbox) -> str | None:
         if time.time() >= deadline:
             return None
         await asyncio.sleep(MAIL_POLL_INTERVAL)
+
+
+async def wait_email_change_link(mailbox: MailTmMailbox) -> str | None:
+    """LEVEL5 IDからのメール変更確認リンクをMail.tmで待つ"""
+    deadline = time.time() + MAIL_WAIT_TIMEOUT
+    while True:
+        try:
+            items = await mailbox.check_email()
+        except (aiohttp.ClientError, RuntimeError, asyncio.TimeoutError) as e:
+            print(f'[email-change] メール一覧の取得に失敗: {str(e)[:120]}')
+            items = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            subject = str(item.get('subject') or '')
+            if 'メール' not in subject or '変更' not in subject:
+                continue
+            mail_id = item.get('id')
+            if not mail_id:
+                continue
+            try:
+                body = await mailbox.fetch_body(str(mail_id))
+            except (aiohttp.ClientError, RuntimeError, asyncio.TimeoutError) as e:
+                print(f'[email-change] メール本文の取得に失敗: {str(e)[:120]}')
+                continue
+            for candidate in re.findall(r'https?://[^\s<>"\']+', html.unescape(body)):
+                candidate = candidate.rstrip(').,，。；;')
+                parsed = urlparse(candidate)
+                change_path = parsed.path.lower()
+                if (parsed.scheme == 'https'
+                        and parsed.hostname == 'auth.level5-id.com'
+                        and any(word in change_path
+                                for word in ('verify', 'confirm', 'change', 'email', 'mail'))):
+                    return candidate
+        if time.time() >= deadline:
+            return None
+        await asyncio.sleep(MAIL_POLL_INTERVAL)
+
+
+async def start_level5_email_change(interaction: discord.Interaction,
+                                    current_email: str, password: str):
+    """LEVEL5 IDで変更申請し、Mail.tmの確認リンクを本人へDMする"""
+    user_id = interaction.user.id
+    if user_id in ACCOUNT_RUNNING:
+        return await interaction.response.send_message(
+            '⏳ アカウント作成またはメール変更が実行中です。完了までお待ちください。',
+            ephemeral=True)
+    ACCOUNT_RUNNING.add(user_id)
+    lease = None
+    status = None
+    new_email = None
+
+    async def update_status(text: str) -> bool:
+        if status is None:
+            return False
+        try:
+            await status.edit(content=text)
+            return True
+        except discord.HTTPException as e:
+            log_line(f'メール変更進捗の更新に失敗 user={user_id}: {str(e)[:120]}')
+            return False
+
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        status = await interaction.followup.send(
+            'メール変更の準備をしています...', ephemeral=True, wait=True)
+        lease = await lease_proxy()
+        connector = None
+        if lease is not None:
+            if ProxyConnector is None:
+                raise RuntimeError('aiohttp_socks が入っていないためプロキシ経由で接続できません')
+            connector = ProxyConnector.from_url(lease.url)
+        async with aiohttp.ClientSession(
+                connector=connector, trust_env=lease is None) as session:
+            mailbox = MailTmMailbox(session)
+            new_email = await mailbox.create_address()
+            await update_status('LEVEL5 IDへログインしてメール変更を申請しています...')
+            await asyncio.to_thread(
+                ywp_auto.change_level5_email,
+                current_email.strip(), password, new_email,
+                proxy=lease.url if lease is not None else None)
+            await update_status(
+                f'変更確認メールを待っています（最大 {int(MAIL_WAIT_TIMEOUT)} 秒）...')
+            link = await wait_email_change_link(mailbox)
+            if link is None:
+                raise RuntimeError('確認メールが届きませんでした。新しいメールアドレスが受け付けられたか確認してください')
+
+        message = (f'LEVEL5 IDのメールアドレス変更確認リンクです。\n'
+                   f'新しいメールアドレス: `{new_email}`\n'
+                   'メール受信: https://mail.tm\n'
+                   f'リンクを開いて変更を完了してください:\n{link}')
+        try:
+            await interaction.user.send(message)
+            await update_status('✅ 確認リンクをDMしました。リンクを開いてメール変更を完了してください。')
+        except discord.HTTPException:
+            await update_status('⚠ DMを送れなかったため、この個人用メッセージに確認リンクを表示します。')
+            await interaction.followup.send(message, ephemeral=True)
+    except Exception as e:
+        log_line(f'LEVEL5メール変更に失敗 user={user_id}: {str(e)[:180]}')
+        text = f'❌ メール変更を完了できませんでした: `{str(e)[:220]}`'
+        if new_email:
+            text += f'\n申請に使用した新しいアドレス: `{new_email}`'
+        if await update_status(text):
+            return
+        try:
+            await interaction.followup.send(text, ephemeral=True)
+        except discord.HTTPException as send_error:
+            log_line(f'メール変更エラー通知に失敗 user={user_id}: {str(send_error)[:120]}')
+    finally:
+        current_email = password = None
+        try:
+            if lease is not None:
+                lease.release()
+        finally:
+            ACCOUNT_RUNNING.discard(user_id)
 
 
 async def create_level5_account(progress, password: str | None = None,
@@ -1783,7 +1904,7 @@ async def unlock_menus(c: Client, progress=None) -> dict:
 
 
 async def clear_stage(c: Client, stage_id: int, progress=None,
-                      attempts: int = AGED_CLEAR_RETRY, inspect: bool = True):
+                      attempts: int = AGED_CLEAR_RETRY, inspect: bool = True) -> int:
     """stage_id を1回クリアする（久垢作成用）。できなければ RuntimeError
 
     バトル時間の下限は通常の周回と同じものを守る（BATTLE_TIME_MIN 参照）。
@@ -1832,7 +1953,7 @@ async def clear_stage(c: Client, stage_id: int, progress=None,
 
         code = result.get('resultCode') if isinstance(result, dict) else None
         if code == 0 and not inspect:
-            return
+            return reward_youkai_id(result)
         if code == 0:
             # クリアでサーバー側の進行（解放フラグ）が動いたかを残す。
             # 「クリアはされるがショップ/ガシャが解放されない」の切り分け用
@@ -1853,13 +1974,222 @@ async def clear_stage(c: Client, stage_id: int, progress=None,
                             else 'なし（menufunc/tutorial が1つも動いていない）'))
             except Exception as e:
                 log_line(f'クリア後のセーブ取り直しに失敗: {str(e)[:120]}')
-            return
+            return reward_youkai_id(result)
         last = f'gameEnd rc={code} ({RC.get(code, "不明")})'
         if code in FATAL_CODES:
             raise RuntimeError(last)
         await asyncio.sleep(AGED_RETRY_WAIT)
 
     raise RuntimeError(last or 'ステージをクリアできませんでした')
+
+
+def stone_event_stage_groups(c: Client) -> tuple[list[int], list[int], str]:
+    """現在のイベント通常面と種別20のボス面を分けて返す"""
+    stage_ids, _, event_name = current_event_stages()
+    if not stage_ids:
+        raise RuntimeError('開催中イベントのステージ一覧を取得できませんでした')
+    table = c.master_table('ywp_mst_stage')
+    stage_rows = {row[0]: row for row in table if row}
+    normal = [sid for sid in stage_ids
+              if len(stage_rows.get(str(sid), [])) > 3
+              and stage_rows[str(sid)][3] == '1']
+    bosses = [sid for sid in stage_ids
+              if len(stage_rows.get(str(sid), [])) > 3
+              and stage_rows[str(sid)][3] == '20']
+    if not normal or not bosses:
+        raise RuntimeError('イベント通常面またはボス面をマスターから特定できませんでした')
+    return normal, bosses, event_name or '開催中イベント'
+
+
+def stage_allowed_tribes(c: Client, stage_id: int) -> set[int] | None:
+    """ステージマスターの11ビット種族マスクから使用可能な種族を読む"""
+    row = next((r for r in c.master_table('ywp_mst_stage')
+                if r and r[0] == str(stage_id)), None)
+    if row is None or len(row) <= 25 or not row[25]:
+        return None
+    mask = row[25].split(',', 1)[0]
+    if not re.fullmatch(r'[01]{11}', mask):
+        raise RuntimeError(f'ステージ {stage_id} の種族制限マスターを解釈できません')
+    allowed = {index + 1 for index, value in enumerate(mask) if value == '1'}
+    return allowed or None
+
+
+async def prepare_stone_stage_deck(c: Client, stage_id: int,
+                                   priority_youkai: str | None,
+                                   progress) -> str | None:
+    """ステージの種族条件に合う攻撃力上位デッキを編成する"""
+    allowed = stage_allowed_tribes(c, stage_id)
+    attacks = c.youkai_attack()
+    if not attacks:
+        raise RuntimeError('所持妖怪の攻撃力を取得できず、編成できません')
+
+    if allowed is None:
+        deck = c.strongest_deck(leader=priority_youkai)
+        warning = None
+    else:
+        tribes = {
+            row[0]: int(row[2])
+            for row in c.master_table('ywp_mst_youkai')
+            if len(row) > 2 and row[2].isdigit()
+        }
+        candidates = [yid for yid, _ in sorted(
+            attacks.items(), key=lambda item: -item[1])
+                      if tribes.get(yid) in allowed]
+        if priority_youkai in candidates:
+            candidates.remove(priority_youkai)
+            candidates.insert(0, priority_youkai)
+        deck = candidates[:5]
+        warning = None
+        if not deck:
+            deck = c.strongest_deck(leader=priority_youkai)
+            warning = '種族条件に合う所持妖怪がいないため、攻撃力上位の編成で続行します'
+        elif len(deck) < 5:
+            warning = f'種族条件に合う所持妖怪が{len(deck)}体のため、その編成で続行します'
+
+    old_deck, _ = c.current_deck()
+    if deck and deck != old_deck:
+        code = await asyncio.to_thread(c.deck_edit, deck)
+        if code != 0:
+            raise RuntimeError(f'ステージ {stage_id} 用の編成に失敗しました（rc={code}）')
+    if warning:
+        log_line(f'石垢 編成注意 stage={stage_id}: {warning}')
+        await progress(f'⚠ {warning}')
+    return warning
+
+
+async def make_stone_account(rec: AccountRecord, target_ypoint: int, progress):
+    """イベント通常面を進行し、ボス面で目標Yポイントまで稼ぐ"""
+    rec.ypoint_target = target_ypoint
+    c = rec.client
+    if c is None:
+        rec.stone_ok = False
+        rec.stone_error = 'セーブデータを作成できなかったため進行できません'
+        await progress(f'⚠ {rec.stone_error}')
+        return
+
+    try:
+        await asyncio.to_thread(c.refresh)
+        final_points = c.points().get('ypoint')
+        if final_points is None:
+            raise RuntimeError('現在のYポイントを取得できませんでした')
+
+        async def finish_if_reached(points: int | None) -> bool:
+            if points is None or points < target_ypoint:
+                return False
+            rec.cleared = True
+            rec.stone_ok = True
+            rec.final_ypoint = points
+            await progress(f'✅ 石垢作成完了: Yポイント {points:,}/{target_ypoint:,}')
+            return True
+
+        if await finish_if_reached(final_points):
+            return
+
+        normal_stages, boss_stages, event_name = stone_event_stage_groups(c)
+        unlock_stages = list(COIN_ACCOUNT_STAGE_IDS)
+        total_stages = len(unlock_stages) + len(normal_stages) + len(boss_stages)
+        stage_number = 0
+        priority_youkai = None
+
+        for stage_id in unlock_stages:
+            if ACCOUNT_PAUSE['paused'] or maint_window():
+                raise RuntimeError('メンテナンスまたは管理者停止のため中断しました')
+            stage_number += 1
+            await progress(
+                f'🔓 イベント解放のため第1章を進行中... `{stage_id}` '
+                f'（{stage_number}/{total_stages}）')
+            await clear_stage(c, stage_id, progress, inspect=False)
+            final_points = c.points().get('ypoint')
+            if await finish_if_reached(final_points):
+                return
+
+        event_rows = {row[0]: row for row in c.master_table('ywp_mst_stage') if row}
+        ordered_stages = normal_stages + boss_stages
+        for stage_id in ordered_stages:
+            if ACCOUNT_PAUSE['paused'] or maint_window():
+                raise RuntimeError('メンテナンスまたは管理者停止のため中断しました')
+            stage_number += 1
+            stage_row = event_rows.get(str(stage_id), [])
+            stage_name = stage_row[2] if len(stage_row) > 2 else str(stage_id)
+            await progress(
+                f'⚔ {event_name}を進行中... {stage_name} `{stage_id}` '
+                f'（{stage_number}/{total_stages}）')
+            await prepare_stone_stage_deck(c, stage_id, priority_youkai, progress)
+            reward_id = await clear_stage(c, stage_id, progress, inspect=False)
+            is_boss = (stage_id in boss_stages or 'ボス' in stage_name)
+            if is_boss and reward_id:
+                try:
+                    code, _ = await asyncio.to_thread(c.make_leader, reward_id)
+                except Exception as e:
+                    log_line(f'石垢 ボス自動編成失敗 stage={stage_id}: {str(e)[:150]}')
+                    await progress(f'⚠ {stage_name}で仲間になった妖怪を編成できませんでした')
+                else:
+                    if code in (0, 'already'):
+                        priority_youkai = str(reward_id)
+                        await progress(
+                            f'🤝 {youkai_label(reward_id)} が仲間になったため、以降の編成に加えました')
+                    else:
+                        log_line(f'石垢 ボス自動編成失敗 stage={stage_id} rc={code}')
+                        await progress(
+                            f'⚠ {youkai_label(reward_id)} は仲間になりましたが、編成できませんでした（rc={code}）')
+            final_points = c.points().get('ypoint')
+            if await finish_if_reached(final_points):
+                return
+
+        await progress('📮 ステージ報酬・ミッション・郵便を受け取っています...')
+        await asyncio.to_thread(c.receive_missions)
+        await asyncio.to_thread(c.receive_presents)
+        await asyncio.to_thread(c.refresh)
+
+        boss_stage = boss_stages[-1]
+        final_points = c.points().get('ypoint')
+        if final_points is None:
+            raise RuntimeError('現在のYポイントを取得できませんでした')
+        if await finish_if_reached(final_points):
+            return
+        attempts = 0
+        while final_points < target_ypoint:
+            if ACCOUNT_PAUSE['paused'] or maint_window():
+                raise RuntimeError('メンテナンスまたは管理者停止のため中断しました')
+            await prepare_stone_stage_deck(c, boss_stage, priority_youkai, progress)
+            reward_id = await clear_stage(c, boss_stage, progress, inspect=False)
+            attempts += 1
+            if reward_id:
+                try:
+                    code, _ = await asyncio.to_thread(c.make_leader, reward_id)
+                except Exception as e:
+                    log_line(f'石垢 ボス自動編成失敗 stage={boss_stage}: {str(e)[:150]}')
+                    await progress(f'⚠ {youkai_label(reward_id)} を編成できませんでした')
+                else:
+                    if code in (0, 'already'):
+                        priority_youkai = str(reward_id)
+                        await progress(
+                            f'🤝 {youkai_label(reward_id)} が仲間になったため、以降の編成に加えました')
+                    else:
+                        await progress(
+                            f'⚠ {youkai_label(reward_id)} は仲間になりましたが、編成できませんでした（rc={code}）')
+            if attempts % 5 == 0:
+                await asyncio.to_thread(c.refresh)
+            final_points = c.points().get('ypoint')
+            if final_points is None:
+                raise RuntimeError('バトル後のYポイントを取得できませんでした')
+            reached = await finish_if_reached(final_points)
+            if attempts % 5 == 0 and not reached:
+                await progress(
+                    f'🔷 ボス面を周回中... Yポイント {final_points:,}/{target_ypoint:,} '
+                    f'（{attempts}戦）')
+            if reached:
+                return
+    except Exception as e:
+        rec.cleared = False
+        rec.stone_ok = False
+        rec.stone_error = str(e)[:240]
+        try:
+            rec.final_ypoint = c.points().get('ypoint')
+        except Exception as points_error:
+            log_line(f'石垢 最終Yポイント取得失敗: {str(points_error)[:120]}')
+            rec.final_ypoint = None
+        await progress(f'⚠ 石垢の進行を完了できませんでした: `{rec.stone_error[:160]}`')
 
 
 VIP_NAME_RANK = 'Z'     # このランク以上は、引いた妖怪の名前まで並べる（下は数だけ）
@@ -2072,7 +2402,7 @@ def account_result_embed(rec: AccountRecord, index: int = 1, total: int = 1,
     if total > 1:
         title += f'（{index}/{total}件目）'
     ok = (rec.cleared is not False and rec.vip_ok is not False
-          and rec.coin_gacha_ok is not False)
+          and rec.stone_ok is not False and rec.coin_gacha_ok is not False)
     e = discord.Embed(color=COLOR_OK if ok else COLOR_WARN, title=title, timestamp=rec.created_at)
     e.add_field(name='メールアドレス', value=f'`{rec.email}`', inline=False)
     e.add_field(name='パスワード', value=f'||{rec.password}||', inline=False)
@@ -2107,6 +2437,14 @@ def account_result_embed(rec: AccountRecord, index: int = 1, total: int = 1,
         e.add_field(name='🪙 コインガチャ',
                     value=(rec.coin_gacha_text or '結果なし')[:1024],
                     inline=False)
+    if rec.ypoint_target is not None:
+        final = '取得失敗' if rec.final_ypoint is None else f'{rec.final_ypoint:,}'
+        status = '✅ 目標到達' if rec.stone_ok else f'⚠ {rec.stone_error or "未到達"}'
+        e.add_field(
+            name='🔷 石垢の進行',
+            value=f'Yポイント: **{final} / {rec.ypoint_target:,}**\n{status}'[:1024],
+            inline=False,
+        )
     e.add_field(
         name='ℹ 補足',
         value='・パスワードはスポイラーで隠してあります（タップで表示）\n'
@@ -2138,6 +2476,27 @@ def accounts_txt(records: list[AccountRecord], started_at: datetime,
         done = sum(1 for r in records if r.coin_gacha_ok)
         head.append(f'第1章1〜15面クリア: {cleared}件 / {len(records)}件')
         head.append(f'コインガチャ完了: {done}件 / {len(records)}件')
+    if kind == '石垢':
+        done = sum(1 for r in records if r.stone_ok)
+        head.append(f'Yポイント目標到達: {done}件 / {len(records)}件')
+        head.append(
+            f'目標Yポイント: {records[0].ypoint_target:,}' if records
+            and records[0].ypoint_target is not None else '目標Yポイント: 不明')
+        lines = head + ['=' * 56, '']
+        for index, record in enumerate(records, 1):
+            final = ('取得失敗' if record.final_ypoint is None
+                     else f'{record.final_ypoint:,}')
+            status = '目標到達' if record.stone_ok else \
+                f'未到達: {record.stone_error or "不明"}'
+            lines += [
+                f'【{index}件目】',
+                f'メールアドレス: {record.email}',
+                f'パスワード: {record.password}',
+                f'最終Yポイント: {final}',
+                f'結果: {status}',
+                '',
+            ]
+        return '\n'.join(lines)
     head += ['=' * 56, '']
     tail = []
     if kind == '回し放題垢':
@@ -2168,7 +2527,7 @@ async def send_accounts_txt(interaction: discord.Interaction,
     text = accounts_txt(records, started_at, finished_at, kind, ng)
     data = text.encode('utf-8')
     fname = f'accounts_{started_at:%Y%m%d_%H%M}_{len(records)}.txt'
-    header = (f'📄 **{kind}** {len(records)}件のメアド/パスワードです。\n'
+    header = (f'📄 **{kind}** {len(records)}件の作成結果です。\n'
               f'📅 **{fmt_jp_datetime(started_at)}** 〜 '
               f'**{fmt_jp_datetime(finished_at)}** に作成'
               + (f'\n⚠ ほかに {ng}件が作成失敗しています。' if ng else ''))
@@ -2551,7 +2910,8 @@ async def start_account_creation(interaction: discord.Interaction, count: int = 
                                  player_name: str | None = None,
                                  aged: bool = False, vip: int | None = None,
                                  coin_gacha: bool = False,
-                                 order: str | None = None, price: int = 0):
+                                 order: str | None = None, price: int = 0,
+                                 ypoint_target: int | None = None):
     """「アカウント作成」/「久垢作成」/「回し放題垢作成」の共通入口。count件ぶん連続で作成する
 
     password    固定パスワード。空欄なら1件ごとにランダム生成
@@ -2559,13 +2919,15 @@ async def start_account_creation(interaction: discord.Interaction, count: int = 
     aged        Trueならセーブ作成後に AGED_STAGE_ID をクリアさせる（久垢）
     vip         連数を渡すと、第1章16面をクリアしてから まわし放題ガシャを引く（回し放題垢）
     coin_gacha  Trueなら第1章1〜15面をクリアして所持コインをすべて使う
+    ypoint_target 指定時は石垢としてイベント進行・ボス周回を行い、Yポイント目標で止める
     order       有料版の取引番号（支払い確認済み）。回し放題まで済んだ垢が count 件そろうまで
                 作り直し（VIP_PAID_RETRY）、足りなければお客様とオーナーに知らせる
     price       有料版で受け取った金額（完了実績に載せる）
     ACCOUNT_TXT_THRESHOLD 件以上まとめて作るときは、1件ずつDMせずに
     最後に「メアド:パスワード」の .txt をDMで送る。
     """
-    kind = ('コインガチャ初期垢' if coin_gacha else
+    kind = ('石垢' if ypoint_target is not None else
+            'コインガチャ初期垢' if coin_gacha else
             '久垢' if aged else '回し放題垢' if vip else '通常垢')
     fixed_password = (password or '').strip() or None
     name_tpl = (player_name or '').strip() or None
@@ -2579,7 +2941,7 @@ async def start_account_creation(interaction: discord.Interaction, count: int = 
         await interaction.response.defer(ephemeral=True, thinking=True)
     ACCOUNT_RUNNING.add(interaction.user.id)
 
-    bulk = count >= ACCOUNT_TXT_THRESHOLD   # まとめてtxtで渡すか
+    bulk = ypoint_target is not None or count >= ACCOUNT_TXT_THRESHOLD
     records: list[AccountRecord] = []
     ng_count = 0
     started_at = datetime.now()
@@ -2640,7 +3002,11 @@ async def start_account_creation(interaction: discord.Interaction, count: int = 
                         await progress(f'{head}❌ {i}件目は失敗: `{str(e)[:200]}`')
                         continue
 
-                    if coin_gacha:
+                    if ypoint_target is not None:
+                        await make_stone_account(
+                            rec, ypoint_target,
+                            lambda t, h=head: progress(h + t))
+                    elif coin_gacha:
                         log_line(f'コインガチャ初期垢 開始 email={rec.email}')
                         await make_coin_gacha_account(rec, lambda t, h=head: progress(h + t))
                     # 久垢はここで初回ステージまでクリアさせる
@@ -2725,6 +3091,10 @@ async def start_account_creation(interaction: discord.Interaction, count: int = 
             pulled = sum(1 for r in records if r.coin_gacha_ok)
             summary += f'\n⚔ 第1章1〜15面クリア: {cleared}件 / {len(records)}件'
             summary += f'\n🎰 コインガチャ完了: {pulled}件 / {len(records)}件'
+        if ypoint_target is not None:
+            done = sum(1 for r in records if r.stone_ok)
+            summary += f'\n🔷 Yポイント目標到達: {done}件 / {len(records)}件'
+            summary += f'\n🎯 1垢あたりの目標: {ypoint_target:,} Yポイント'
         if vip:
             done = sum(1 for r in records if r.vip_ok)
             summary += f'\n🎰 第1章クリア＋まわし放題ガシャ: {done}件 / {len(records)}件'
@@ -6213,8 +6583,55 @@ class AccountCountModal(discord.ui.Modal, title='アカウント作成'):
         await report_error(interaction, error, 'AccountCountModal')
 
 
+class StoneAccountModal(discord.ui.Modal, title='石垢作成'):
+    count = discord.ui.Label(
+        text='作成数',
+        description=f'1〜{MAX_ACCOUNTS_PER_RUN:,}件',
+        component=discord.ui.TextInput(placeholder='1', default='1', max_length=6),
+    )
+    target = discord.ui.Label(
+        text='目標Yポイント',
+        description=f'各アカウントが到達したら停止（最大 {WALLET_CAPS["ypoint"]:,}）',
+        component=discord.ui.TextInput(placeholder='例: 10000', max_length=8),
+    )
+    password = discord.ui.Label(
+        text='パスワード（固定・任意）',
+        description='空欄ならアカウントごとにランダム生成',
+        component=discord.ui.TextInput(placeholder='空欄でランダム生成',
+                                       required=False, max_length=100),
+    )
+    name = discord.ui.Label(
+        text='アカウント名（任意）',
+        description=f'空欄ならランダム生成。{PLAYER_NAME_MAX}文字以内。`{{n}}` は連番',
+        component=discord.ui.TextInput(placeholder='例: 石垢{n}', required=False,
+                                       max_length=PLAYER_NAME_MAX + 3),
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            count = int(self.count.component.value.strip().replace(',', ''))
+            target = int(self.target.component.value.strip().replace(',', ''))
+        except ValueError:
+            return await interaction.response.send_message(
+                '❌ 作成数と目標Yポイントは整数で指定してください。', ephemeral=True)
+        if not (1 <= count <= MAX_ACCOUNTS_PER_RUN):
+            return await interaction.response.send_message(
+                f'❌ 作成数は 1〜{MAX_ACCOUNTS_PER_RUN:,} の整数で指定してください。',
+                ephemeral=True)
+        if not (1 <= target <= WALLET_CAPS['ypoint']):
+            return await interaction.response.send_message(
+                f'❌ 目標Yポイントは 1〜{WALLET_CAPS["ypoint"]:,} で指定してください。',
+                ephemeral=True)
+        await start_account_creation(
+            interaction, count, self.password.component.value,
+            self.name.component.value, ypoint_target=target)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        await report_error(interaction, error, 'StoneAccountModal')
+
+
 class AccountModeView(discord.ui.View):
-    """通常作成、コインガチャ初期垢、極ツチノコ狙いを選ぶ"""
+    """通常作成、石垢、コインガチャ初期垢、極ツチノコ狙いを選ぶ"""
 
     def __init__(self, owner_id: int):
         super().__init__(timeout=180)
@@ -6247,6 +6664,36 @@ class AccountModeView(discord.ui.View):
     async def coin_target(self, interaction: discord.Interaction,
                           button: discord.ui.Button):
         await interaction.response.send_modal(CoinTargetAccountModal())
+
+    @discord.ui.button(label='石垢作成（Yポイント目標）',
+                       style=discord.ButtonStyle.success, emoji='🔷')
+    async def stone(self, interaction: discord.Interaction,
+                    button: discord.ui.Button):
+        await interaction.response.send_modal(StoneAccountModal())
+
+
+class EmailChangeModal(discord.ui.Modal, title='メールアドレス変更'):
+    email = discord.ui.Label(
+        text='現在のメールアドレス',
+        component=discord.ui.TextInput(placeholder='LEVEL5 IDに登録中のアドレス',
+                                       max_length=120),
+    )
+    password = discord.ui.Label(
+        text='LEVEL5 IDパスワード',
+        description='変更申請にだけ使用し、保存・ログ出力しません',
+        component=discord.ui.TextInput(placeholder='現在のパスワード', max_length=100),
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        email = self.email.component.value.strip()
+        if '@' not in email or any(char.isspace() for char in email):
+            return await interaction.response.send_message(
+                '❌ メールアドレスの形式を確認してください。', ephemeral=True)
+        await start_level5_email_change(
+            interaction, email, self.password.component.value)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        await report_error(interaction, error, 'EmailChangeModal')
 
 
 class CoinTargetAccountModal(discord.ui.Modal, title='SSS極ツチノコ狙い'):
@@ -7647,6 +8094,16 @@ class PanelView(discord.ui.View):
             '作成するアカウントの種類を選んでください。',
             view=AccountModeView(interaction.user.id), ephemeral=True)
 
+    @discord.ui.button(label='メールアドレス変更', style=discord.ButtonStyle.secondary,
+                       emoji='📧', custom_id='ywp:email_change')
+    async def email_change(self, interaction: discord.Interaction,
+                           button: discord.ui.Button):
+        if interaction.user.id in ACCOUNT_RUNNING:
+            return await interaction.response.send_message(
+                '⏳ アカウント作成またはメール変更が実行中です。完了までお待ちください。',
+                ephemeral=True)
+        await interaction.response.send_modal(EmailChangeModal())
+
     @discord.ui.button(label='前回の条件で再周回', style=discord.ButtonStyle.secondary,
                        emoji='🔁', custom_id='ywp:repeat')
     async def repeat_farm(self, interaction: discord.Interaction,
@@ -8128,6 +8585,11 @@ def panel_embed() -> discord.Embed:
             '↳ メール・パスワード・獲得キャラを記載した.txtをDMに添付\n'
             '🎯 **SSS極ツチノコ狙い**: 6面まで進行後に郵便を受け取り、コインガチャを実行（専用5枠）\n'
             '↳ 指定試行数の完了後、当たりアカウント情報と全試行ログを.txtでDM\n'
+            '🔷 **石垢作成**: 目標Yポイントを指定。イベント通常面→ボス面の順で進行し、'
+            '制限に合わせて編成\n'
+            '↳ 指定数の完了後、メールアドレス・パスワード・最終Yポイントを.txtでDM\n'
+            '📧 **メールアドレス変更**: LEVEL5 IDにログインして変更申請し、確認リンクをDM\n'
+            '↳ パスワードは申請時のみ使用し、保存・ログ出力しません\n'
             f'🕰 **久垢作成**: ステージ`{AGED_STAGE_ID}`クリア済みのアカウントは '
             '`/久垢作成設置` のパネルから作成\n\n'
             '💡 ステージIDが不明なら **📋 ステージ一覧** を確認\n'
