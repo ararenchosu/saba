@@ -1649,6 +1649,8 @@ class Client:
             else:
                 js['_clockAnchor'], js['_rtt'] = time.time(), 0.0
             dump_start_payload(js)
+            # 【準備フェーズ】ゲート関連情報をデバッグログ出力
+            log_gate_debug(js, stageId, battleType)
         return rc, js, battleType
 
     def battle_end(self, stageId, battleType, start, clearTime=None):
@@ -2822,6 +2824,61 @@ def confirm(prompt):
         elif result in ['n', 'no', 'いいえ']:
             return False
         print('⚠ y または n で答えてください')
+
+
+# ============================================================================
+# 【準備フェーズ】ゲートイベント対応ヘルパー関数
+# ============================================================================
+
+def extract_gate_related_keys(js):
+    """gameStart応答からゲート関連キーを抽出（準備フェーズ用）
+    
+    ゲートイベント実装前の調査用。gameStart応答にゲート情報が含まれる
+    キーを特定するための関数。Phase 1 の情報収集に使用。
+    
+    Returns:
+        dict: ゲート関連キーとその値のマッピング
+    """
+    if not isinstance(js, dict):
+        return {}
+    
+    gate_keys = {}
+    gate_keywords = ['gate', 'warp', 'eventWarp', 'selectGate', 'stageGate', 
+                     'gateList', 'warpPoint', 'choice', 'portal']
+    
+    for key, value in js.items():
+        if any(kw.lower() in key.lower() for kw in gate_keywords):
+            gate_keys[key] = value
+    
+    return gate_keys
+
+
+def log_gate_debug(js, stageId, battleType):
+    """ゲート関連デバッグログ出力（準備フェーズ用）
+    
+    gameStart応答からゲート情報を抽出してログ出力。
+    YWP_DEBUG_GATE=1 環境変数で有効化される。
+    """
+    debug_mode = os.environ.get('YWP_DEBUG_GATE', '').lower() in ('1', 'true', 'yes')
+    if not debug_mode:
+        return
+    
+    gate_keys = extract_gate_related_keys(js)
+    
+    print(f'\n[GATE_DEBUG] stageId={stageId}, battleType={battleType}')
+    if gate_keys:
+        print(f'[GATE_DEBUG] ✓ ゲート関連キーが見つかりました:')
+        for key, value in gate_keys.items():
+            # valueが大きすぎる場合は省略
+            if isinstance(value, (dict, list)):
+                print(f'  - {key}: {type(value).__name__} (len={len(value)})')
+            else:
+                val_str = str(value)[:100]
+                print(f'  - {key}: {val_str}')
+    else:
+        print(f'[GATE_DEBUG] ゲート関連キーが見つかりません')
+    print()
+
 
 def main():
     path = setup_log(tee=True)
