@@ -4599,22 +4599,27 @@ def item_label(item_id) -> str:
 
 
 def key_status_text(job: FarmJob) -> str:
-    inventory = job.item_prev or job.current_items or {}
     stage_id = (job.stage_ids[job.stage_pos % len(job.stage_ids)]
                 if job.is_preset and job.stage_ids else job.stage_id)
     stage_no = stage_id % 1000 if stage_id >= 1_000_000 else None
     if stage_no not in range(1, 10):
         return '現在の面の鍵情報を判定できません'
 
-    lines = [f'現在：{stage_no}面']
+    inventory = job.item_prev if job.item_prev is not None else job.current_items
+    if inventory is None:
+        return '鍵の所持数を取得できていません'
+
+    lines = [f'**現在：第{stage_no}面**（所持数 / 今回の増加）']
     for item_id in KEY_ITEM_IDS:
         number = (item_id // 10) % 10
         if number != stage_no:
             continue
         color = item_id % 10
         count = inventory.get(str(item_id), inventory.get(item_id, 0))
-        state = '埋まり' if count >= KEY_ITEM_LIMIT else f'{count:,}/{KEY_ITEM_LIMIT:,}'
-        lines.append(f'・{number}面・第{number}の鍵（{KEY_COLORS[color]}）：`{state}`')
+        gained = job.item_counts.get(str(item_id), 0)
+        state = f'{count:,}/{KEY_ITEM_LIMIT:,}' + ('（埋まり）' if count >= KEY_ITEM_LIMIT else '')
+        lines.append(f'・第{number}の鍵（{KEY_COLORS[color]}）：`{state}` / +{gained:,}')
+    lines.append('※ 増加数にはドロップ以外の入手も含まれます')
     return '\n'.join(lines)
 
 
@@ -5408,6 +5413,7 @@ async def refresh_points(job: FarmJob, c: Client, i: int) -> bool:
         job.now_points = c.points()
         job.points_at = time.time()
         job.points_done = job.done
+        on_items(job, c, {'ywp_user_item': c.save.get('ywp_user_item')})
         job.refreshes += 1
         job.refreshed.set()          # 更新ボタンの待ち合わせを解除
         # 周回でサーバー側の進行が動いているかを見る。クリアしているのに
@@ -5524,8 +5530,8 @@ async def _run_job(job: FarmJob, email: str, password: str,
                 pass
             set_food_policy(job, c)
             saved_items = c.save.get('ywp_user_item')
-            job.item_prev = _inventory(saved_items)
             if saved_items is not None:
+                job.item_prev = _inventory(saved_items)
                 job.current_items = tracked_inventory(job.item_prev)
             await push_progress(job)
             # 開き損ねたメニュー（ショップ等）があれば周回の前に開け直す
@@ -9084,6 +9090,7 @@ def panel_embed() -> discord.Embed:
             '📊 **状況確認**: 実行中ジョブの確認と操作\n'
             '↳ ⏸ 一時停止 / ▶ 再開 / ⏹ 中止 はジョブ単位\n'
             '↳ 所持数は **🔄 更新** を押したときに取得\n'
+            '↳ 個別表示の鍵は現在の面を表示。面が進んだら **🔄 情報更新** で切り替え\n'
             '🔁 **前回の条件で再周回**: 保存したアカウント・セーブ・設定で再スタート\n'
             '🆕 **アカウント作成**: 通常作成、または初期垢＋コインガチャを選択\n'
             '↳ 捨てメールでLEVEL5 IDと周回用セーブデータを作成\n'
