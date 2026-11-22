@@ -10104,6 +10104,209 @@ async def paypay_login2(interaction: discord.Interaction, otp: str):
     await interaction.followup.send(f'✅ {msg}\n{wallet}', ephemeral=True)
 
 
+# ===== イベント解析パネル =====
+def event_analysis_embed(analysis_result: dict) -> discord.Embed:
+    """イベント解析結果をembed形式で返す"""
+    response = analysis_result.get('response', {})
+    structure = analysis_result.get('structure', {})
+    has_gate = analysis_result.get('has_gate_info', False)
+    
+    stageId = analysis_result.get('stageId', '?')
+    battleType = analysis_result.get('battleType', '?')
+    
+    # イベントタイプの判定
+    event_type_name = "通常イベント（周回）"
+    event_type_emoji = "🎪"
+    if battleType == 6:
+        event_type_name = "ゲートイベント（ワープ選択）"
+        event_type_emoji = "🚪"
+    elif battleType == 20:
+        event_type_name = "特殊イベント"
+        event_type_emoji = "✨"
+    
+    e = discord.Embed(
+        title=f'{event_type_emoji} イベント解析結果',
+        description=f'stageId: **{stageId}** | battleType: **{battleType}**',
+        color=0x1f8b4c if has_gate else 0x5865f2
+    )
+    
+    # ゲート関連情報
+    gate_status = "✅ **あり**" if has_gate else "❌ なし"
+    e.add_field(name='🚪 ゲート関連情報', value=gate_status, inline=False)
+    
+    # 応答キー数
+    key_count = len(response.keys()) if isinstance(response, dict) else 0
+    e.add_field(name='📋 応答キー数', value=f'**{key_count}** 個', inline=True)
+    
+    # 主要キーの表示
+    main_keys = []
+    for key in ['rc', 'userId', 'eventId', 'eventName']:
+        if key in response:
+            value = response[key]
+            if isinstance(value, str):
+                value = f'"{value}"'
+            main_keys.append(f'  • {key}: {value}')
+    
+    if main_keys:
+        e.add_field(name='🔑 主要キー', value='\n'.join(main_keys), inline=False)
+    
+    # キーの一覧（型情報付き）
+    all_keys = []
+    for key in sorted(structure.keys()):
+        value_type = structure[key]
+        if isinstance(response.get(key), (list, dict)):
+            size = len(response[key])
+            all_keys.append(f'  • {key}: {value_type} (len={size})')
+        else:
+            all_keys.append(f'  • {key}: {value_type}')
+    
+    if all_keys:
+        keys_text = '\n'.join(all_keys[:15])  # 最初の15個
+        if len(all_keys) > 15:
+            keys_text += f'\n  ... 他 {len(all_keys) - 15} 個'
+        e.add_field(name='📚 全キー一覧', value=keys_text, inline=False)
+    
+    e.set_footer(text='YWP イベント解析 | Phase 2')
+    return e
+
+
+class EventAnalysisModal(discord.ui.Modal, title="イベント解析"):
+    """イベント解析用モーダル"""
+    
+    response_input = discord.ui.TextInput(
+        label="gameStart応答（JSON）",
+        style=discord.TextStyle.paragraph,
+        placeholder='{"rc": 0, "userId": 123456, ...}',
+        required=True
+    )
+    
+    stage_id = discord.ui.TextInput(
+        label="stageId",
+        style=discord.TextStyle.short,
+        placeholder='123',
+        required=True
+    )
+    
+    battle_type = discord.ui.TextInput(
+        label="battleType",
+        style=discord.TextStyle.short,
+        placeholder='1（通常）or 6（ゲート）',
+        required=True
+    )
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            # JSON解析
+            response_text = self.response_input.value.strip()
+            if response_text.startswith('```'):
+                response_text = response_text.strip('`').strip()
+                if response_text.startswith('json'):
+                    response_text = response_text[4:].strip()
+            
+            response = json.loads(response_text)
+            stage_id = self.stage_id.value.strip()
+            battle_type = int(self.battle_type.value.strip())
+            
+            # イベント解析
+            structure = {}
+            for key, value in response.items():
+                structure[key] = type(value).__name__
+            
+            # ゲート関連情報チェック
+            from ywp_auto import extract_gate_related_keys
+            gate_info = extract_gate_related_keys(response)
+            has_gate = len(gate_info) > 0
+            
+            analysis_result = {
+                'response': response,
+                'structure': structure,
+                'has_gate_info': has_gate,
+                'stageId': stage_id,
+                'battleType': battle_type
+            }
+            
+            # 結果を表示
+            embed = event_analysis_embed(analysis_result)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except json.JSONDecodeError as e:
+            await interaction.followup.send(f'❌ JSON形式エラー: {e}', ephemeral=True)
+        except ValueError as e:
+            await interaction.followup.send(f'❌ battleType は数値で指定してください: {e}', ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f'❌ エラー: {e}', ephemeral=True)
+
+
+class EventAnalysisPanelView(discord.ui.View):
+    """イベント解析パネル"""
+    
+    def __init__(self):
+        super().__init__(timeout=None)
+    
+    @discord.ui.button(label='イベント解析', style=discord.ButtonStyle.primary,
+                       emoji='🔍', custom_id='ywp:event:analyze')
+    async def analyze(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(EventAnalysisModal())
+
+
+def event_analysis_panel_embed() -> discord.Embed:
+    """イベント解析パネルの説明embed"""
+    e = discord.Embed(
+        title='🔍 YWP イベント解析パネル',
+        description='gameStart応答のJSON形式データを入力して、イベント構造を解析します。',
+        color=0x5865f2
+    )
+    e.add_field(
+        name='📋 使用方法',
+        value=(
+            '1. 下のボタンをクリック\n'
+            '2. gameStart応答をJSON形式で入力\n'
+            '3. stageId と battleType を指定\n'
+            '4. 送信してイベント構造を確認'
+        ),
+        inline=False
+    )
+    e.add_field(
+        name='🎯 対応イベント',
+        value=(
+            '• 通常イベント（battleType=1）\n'
+            '• ゲートイベント（battleType=6）\n'
+            '• 特殊イベント（battleType=20等）'
+        ),
+        inline=False
+    )
+    e.add_field(
+        name='💡 Tips',
+        value=(
+            '環境変数で自動ログ記録:\n'
+            '`YWP_DEBUG_EVENT=1` - 全イベント情報\n'
+            '`YWP_DEBUG_GATE=1` - ゲート情報のみ'
+        ),
+        inline=False
+    )
+    e.set_footer(text='YWP Phase 2 | イベント解析デバッグ機能')
+    return e
+
+
+@bot.tree.command(name='イベント解析パネル設置', description='イベント解析パネルをこのチャンネルに設置します')
+async def setup_event_analysis_panel(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        return await interaction.response.send_message(ADMIN_ONLY_MSG, ephemeral=True)
+    
+    channel = interaction.channel
+    if channel is None or not isinstance(channel, discord.abc.Messageable):
+        return await interaction.response.send_message('❌ このチャンネルには設置できません。', ephemeral=True)
+    
+    try:
+        await channel.send(embed=event_analysis_panel_embed(), view=EventAnalysisPanelView())
+    except discord.Forbidden:
+        return await interaction.response.send_message('❌ このチャンネルに送信する権限がありません。', ephemeral=True)
+    
+    await interaction.response.send_message('✅ イベント解析パネルを設置しました。', ephemeral=True)
+
+
 @bot.tree.command(name='udkeyパネル設置', description='UDkeyの登録・付け替えパネルをこのチャンネルに設置します')
 async def setup_udkey_panel(interaction: discord.Interaction):
     if not is_admin(interaction.user):
