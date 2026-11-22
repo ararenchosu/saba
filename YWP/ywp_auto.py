@@ -1649,6 +1649,8 @@ class Client:
             else:
                 js['_clockAnchor'], js['_rtt'] = time.time(), 0.0
             dump_start_payload(js)
+            # 【準備フェーズ】全イベント解析ログ出力
+            log_event_debug(js, stageId, battleType)
             # 【準備フェーズ】ゲート関連情報をデバッグログ出力
             log_gate_debug(js, stageId, battleType)
         return rc, js, battleType
@@ -2851,6 +2853,135 @@ def extract_gate_related_keys(js):
             gate_keys[key] = value
     
     return gate_keys
+
+
+def analyze_event_response(js):
+    """gameStart応答からイベント情報を包括的に解析
+    
+    すべてのイベント（通常イベント・特殊イベント・ゲート等）の
+    構造を分析する。YWP_DEBUG_EVENT=1 環境変数で有効化される。
+    
+    Returns:
+        dict: イベント情報の分析結果
+    """
+    if not isinstance(js, dict):
+        return {}
+    
+    analysis = {
+        'type': 'unknown',
+        'keys': [],
+        'structure': {},
+        'sizes': {}
+    }
+    
+    # イベント構造を分析
+    for key, value in js.items():
+        analysis['keys'].append(key)
+        
+        # サイズを記録
+        if isinstance(value, (dict, list)):
+            analysis['sizes'][key] = len(value)
+            analysis['structure'][key] = type(value).__name__
+        elif isinstance(value, str):
+            analysis['sizes'][key] = len(value)
+            analysis['structure'][key] = 'str'
+        elif isinstance(value, (int, float)):
+            analysis['structure'][key] = type(value).__name__
+        elif isinstance(value, bool):
+            analysis['structure'][key] = 'bool'
+        else:
+            analysis['structure'][key] = type(value).__name__
+    
+    return analysis
+
+
+def log_event_debug(js, stageId, battleType):
+    """全イベントの包括的なデバッグログ出力
+    
+    gameStart応答からすべてのイベント情報を解析してログ出力。
+    YWP_DEBUG_EVENT=1 環境変数で有効化される。
+    
+    このモードでは以下が出力されます：
+    - battleType の判定
+    - gameStart応答の全体構造
+    - ゲート関連情報の有無
+    - イベント固有の情報
+    """
+    debug_mode = os.environ.get('YWP_DEBUG_EVENT', '').lower() in ('1', 'true', 'yes')
+    if not debug_mode:
+        return
+    
+    if not isinstance(js, dict):
+        print(f'[EVENT_DEBUG] ✗ gameStart応答が無効です')
+        return
+    
+    analysis = analyze_event_response(js)
+    
+    print(f'\n[EVENT_DEBUG] ═════════════════════════════════════════════')
+    print(f'[EVENT_DEBUG] stageId={stageId}, battleType={battleType}')
+    print(f'[EVENT_DEBUG] ═════════════════════════════════════════════')
+    
+    # battleType の判定と説明
+    bt_name = {
+        1: '通常イベント（周回）',
+        6: 'ゲートイベント（ワープ選択）',
+        20: '特殊イベント（種別20）',
+    }.get(battleType, f'未知（{battleType}）')
+    print(f'[EVENT_DEBUG] イベントタイプ: {bt_name}')
+    
+    # gameStart応答の全体構造
+    print(f'[EVENT_DEBUG] 応答キー数: {len(analysis["keys"])}')
+    print(f'[EVENT_DEBUG] ')
+    print(f'[EVENT_DEBUG] 【応答構造】')
+    
+    # ゲート関連キーの有無
+    gate_keys = extract_gate_related_keys(js)
+    if gate_keys:
+        print(f'[EVENT_DEBUG]   ✓ ゲート関連情報: あり ({len(gate_keys)}個)')
+        for key in gate_keys.keys():
+            val = gate_keys[key]
+            if isinstance(val, (dict, list)):
+                print(f'[EVENT_DEBUG]       - {key}: {type(val).__name__} (len={len(val)})')
+            else:
+                print(f'[EVENT_DEBUG]       - {key}: {type(val).__name__}')
+    else:
+        print(f'[EVENT_DEBUG]   ✗ ゲート関連情報: なし')
+    
+    # 主要キーの表示
+    print(f'[EVENT_DEBUG] ')
+    print(f'[EVENT_DEBUG] 【主要キー】')
+    
+    important_keys = ['rc', 'userId', 'eventId', 'eventName', 'eventPoint', 
+                      'stageData', 'enemy', 'warp', 'warpGate', 'gateList', 
+                      'selectGate', 'eventWarp', 'gameStart', 'battleCode',
+                      'rewards', 'teamData', 'userData']
+    
+    found_important = False
+    for key in important_keys:
+        if key in js:
+            value = js[key]
+            found_important = True
+            if isinstance(value, dict):
+                sub_keys = list(value.keys())[:3]
+                print(f'[EVENT_DEBUG]   {key}: dict (keys={sub_keys}...)')
+            elif isinstance(value, list):
+                print(f'[EVENT_DEBUG]   {key}: list (len={len(value)})')
+            elif isinstance(value, str):
+                val_str = value[:50]
+                print(f'[EVENT_DEBUG]   {key}: str = "{val_str}..."' if len(value) > 50 else f'[EVENT_DEBUG]   {key}: str = "{val_str}"')
+            else:
+                print(f'[EVENT_DEBUG]   {key}: {type(value).__name__} = {value}')
+    
+    # すべてのキーを表示
+    print(f'[EVENT_DEBUG] ')
+    print(f'[EVENT_DEBUG] 【全キー一覧】')
+    for i, key in enumerate(analysis['keys'], 1):
+        type_info = analysis['structure'].get(key, 'unknown')
+        size_info = f" (len={analysis['sizes'][key]})" if key in analysis['sizes'] else ""
+        print(f'[EVENT_DEBUG]   {i:2d}. {key}: {type_info}{size_info}')
+    
+    print(f'[EVENT_DEBUG] ═════════════════════════════════════════════')
+    print()
 
 
 def log_gate_debug(js, stageId, battleType):
