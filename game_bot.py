@@ -5,24 +5,21 @@
 【読み込み・起動するBOT】
   1) メインBOT     … main_bot.py         （身内用・ルートの各機能モジュール含む）
   2) サブBOT       … sub/bot.py          （本格用・コマンド/機能メイン）
-  3) ぷにぷにBOT   … YWP/bot.py          （YWP/PuniPuni自動化モジュール）
-  4) RPG専用BOT    … rpgbot/bot.py       （RPG機能専用・データは sub/userdata.py と共有）
+  3) RPG専用BOT    … rpgbot/bot.py       （RPG機能専用・データは sub/userdata.py と共有）
 
 【特徴】
   ✅ どれか1体が失敗しても、他のBOTはそのまま起動し続ける
-  ✅ YWPフォルダを自動的に検索パスに追加
   ✅ 詳細なエラーメッセージ＋トレースバック表示
   ✅ Ctrl+Cでまとめて安全に停止
 
 【トークン環境変数】 .envファイルまたはシステム環境変数に設定
   メインBOT → DISCORD_TOKEN
   サブBOT   → SUB_DISCORD_TOKEN
-  ぷにぷにBOT → YWP_DISCORD_TOKEN
   RPG BOT   → RPG_DISCORD_TOKEN
 
 【FadeHostでの運用】
   このファイルを game_bot.py として配置し、
-  main_bot.py / sub/ / YWP/ / rpgbot/ を全て同じ階層にアップロードしてください。
+  main_bot.py / sub/ / rpgbot/ を全て同じ階層にアップロードしてください。
 """
 
 import asyncio
@@ -31,8 +28,6 @@ from pathlib import Path
 
 # === パス設定 ===
 BASE_DIR = Path(__file__).resolve().parent
-YWP_DIR = BASE_DIR / "YWP"
-sys.path.insert(0, str(YWP_DIR))
 
 
 # === 各BOT起動関数 ===
@@ -43,12 +38,6 @@ async def start_main_bot():
 
 async def start_sub_bot():
     from sub.bot import start as _start
-    await _start()
-
-
-async def start_ywp_bot():
-    """ぷにぷにBOTを起動"""
-    from YWP.bot import start as _start
     await _start()
 
 
@@ -80,16 +69,7 @@ async def _run_all():
         import traceback
         traceback.print_exc()
 
-    # 3) ぷにぷにBOT
-    try:
-        tasks.append(asyncio.create_task(start_ywp_bot()))
-        print("✅ ぷにぷにBOT 起動")
-    except Exception as e:
-        print(f"⚠️ ぷにぷにBOT 起動失敗: {e}")
-        import traceback
-        traceback.print_exc()
-
-    # 4) RPG専用BOT
+    # 3) RPG専用BOT
     try:
         tasks.append(asyncio.create_task(start_rpg_bot()))
         print("✅ RPG専用BOT 起動")
